@@ -19,7 +19,7 @@ jobs:
       - name: Verify source and build
         run: |
           set -euo pipefail
-          cargo generate-lockfile
+          test -f Cargo.lock
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
@@ -39,6 +39,12 @@ jobs:
           format: spdx-json
           output-file: runtime-sbom.spdx.json
           upload-artifact: false
+      - name: Verify SBOM and checksums
+        run: |
+          set -euo pipefail
+          test -s runtime-sbom.spdx.json
+          sha256sum -c runtime-linux-x86_64.tar.gz.sha256
+          ( cd dist && sha256sum -c SHA256SUMS )
       - name: Attest release bundle provenance
         uses: actions/attest-build-provenance@v2
         with:
