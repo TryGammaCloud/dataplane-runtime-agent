@@ -1,0 +1,64 @@
+name: Release attested runtime
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify source and build
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+          cargo build --workspace --release --locked
+      - name: Package immutable runtime artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/gammacloud-boot target/release/gammacloud-runtime dist/
+          ( cd dist && sha256sum gammacloud-boot gammacloud-runtime > SHA256SUMS )
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 1970-01-01' -czf runtime-linux-x86_64.tar.gz -C dist .
+          sha256sum runtime-linux-x86_64.tar.gz > runtime-linux-x86_64.tar.gz.sha256
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: runtime-sbom.spdx.json
+          upload-artifact: false
+      - name: Verify SBOM and checksums
+        run: |
+          set -euo pipefail
+          test -s runtime-sbom.spdx.json
+          sha256sum -c runtime-linux-x86_64.tar.gz.sha256
+          ( cd dist && sha256sum -c SHA256SUMS )
+      - name: Attest release bundle provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: runtime-linux-x86_64.tar.gz
+      - name: Attest release bundle SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: runtime-linux-x86_64.tar.gz
+          sbom-path: runtime-sbom.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-attested-${{ github.sha }}
+          path: |
+            runtime-linux-x86_64.tar.gz
+            runtime-linux-x86_64.tar.gz.sha256
+            runtime-sbom.spdx.json
+          retention-days: 30
