@@ -31,8 +31,12 @@ pub fn load() -> std::io::Result<Product> {
     match std::fs::read_to_string(Path::new(&path)) {
         Ok(value) => Product::parse(&value)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidData, reason)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            && std::env::var_os("GAMMACLOUD_PRODUCT_PROFILE_FILE").is_none() => Ok(Product::Legacy),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("GAMMACLOUD_PRODUCT_PROFILE_FILE").is_none() =>
+        {
+            Ok(Product::Legacy)
+        }
         Err(error) => Err(error),
     }
 }
