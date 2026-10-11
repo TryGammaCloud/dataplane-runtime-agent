@@ -1,4 +1,6 @@
-//! Local development protocol v1. Not a remote or attested interface.
+//! Typed, guest-local development protocol v1.
+//!
+//! This protocol does not provide remote authentication or attestation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestState {
     Starting,
@@ -17,6 +19,7 @@ impl GuestState {
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Commands accepted by the guest-local development runtime.
 pub enum Request {
     Health,
     Status,
@@ -27,6 +30,7 @@ pub enum Request {
     Stop { id: u64 },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Fixed executable profiles; callers cannot supply arbitrary commands.
 pub enum Profile {
     Smoke,
     Sleep,
@@ -41,6 +45,11 @@ impl Profile {
         }
     }
 }
+/// Parses a bounded ASCII command without accepting arbitrary executables.
+///
+/// # Errors
+///
+/// Rejects invalid lengths, non-ASCII input and unsupported commands.
 pub fn parse_request(line: &str) -> Result<Request, &'static str> {
     if line.len() > 256 || !line.is_ascii() {
         return Err("invalid-request");
