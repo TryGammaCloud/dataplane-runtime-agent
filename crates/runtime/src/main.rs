@@ -244,7 +244,11 @@ mod tests {
     fn lifecycle_and_allowlist() {
         let dir =
             std::env::temp_dir().join(format!("gammacloud-runtime-test-{}", std::process::id()));
-        let mut manager = Manager::new(dir.clone(), Policy::from_env().unwrap(), product::Product::Sandbox);
+        let mut manager = Manager::new(
+            dir.clone(),
+            Policy::from_env().unwrap(),
+            product::Product::Sandbox,
+        );
         let start = manager.start(Profile::Smoke).unwrap();
         assert!(start.contains("id=1"));
         let status = manager.status(1).unwrap();
