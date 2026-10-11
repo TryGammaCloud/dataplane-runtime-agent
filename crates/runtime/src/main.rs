@@ -1,3 +1,9 @@
+//! Guest-local development workload manager.
+//!
+//! # Trust boundary
+//!
+//! This Unix socket is not a host-to-guest authenticated transport.
+//! Development guests report attestation=unverified and confidential=false.
 mod security;
 use gammacloud_protocol::{parse_request, GuestState, Profile, Request};
 use security::{kill_process_group, Policy};
@@ -13,6 +19,7 @@ use std::time::Duration;
 const MAX_WORKLOADS: usize = 16;
 const MAX_LOG_BYTES: u64 = 4096;
 
+/// Tracks a spawned development process and its bounded log files.
 struct Workload {
     child: Child,
     profile: Profile,
@@ -20,6 +27,7 @@ struct Workload {
     stderr: PathBuf,
     exit_code: Option<i32>,
 }
+/// Owns the guest-local workload lifecycle and authorization policy.
 struct Manager {
     jobs: BTreeMap<u64, Workload>,
     next_id: u64,
@@ -35,6 +43,11 @@ impl Manager {
             policy,
         }
     }
+    /// Starts an allowlisted profile with policy limits applied before spawn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if log creation, policy setup or spawning fails.
     fn start(&mut self, profile: Profile) -> std::io::Result<String> {
         if self.jobs.len() >= MAX_WORKLOADS {
             return Ok("ERR capacity-exceeded\n".into());
@@ -50,7 +63,8 @@ impl Manager {
         let stderr = self.log_dir.join(format!("{id}.stderr"));
         let out = File::create(&stdout)?;
         let err = File::create(&stderr)?;
-        // Fixed development profiles only: never accept a caller-controlled executable or arguments.
+        // SECURITY: Only image-controlled executables may be launched.
+        // Never accept caller-controlled paths or command-line arguments.
         let mut cmd = match profile {
             Profile::Smoke => {
                 let mut c = Command::new("/usr/bin/printf");
@@ -139,6 +153,7 @@ impl Manager {
         }
         Ok(format!("OK id={id} state=exited\n"))
     }
+    /// Attempts to terminate and reap every tracked active workload.
     fn shutdown(&mut self) {
         for job in self.jobs.values_mut() {
             if job.exit_code.is_none() {

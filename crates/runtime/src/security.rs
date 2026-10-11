@@ -1,5 +1,10 @@
-//! Linux-only local access policy and per-process resource limits.
-//! This does not authenticate a remote host or prove SEV-SNP attestation.
+//! Linux-only guest-local authorization and per-process resource limits.
+//!
+//! # Security boundary
+//!
+//! Peer UID checks apply to a Unix socket inside the guest only. They do not
+//! authenticate a remote host, verify SEV-SNP evidence, or isolate untrusted code.
+//! Resource limits are per-process; cgroups and namespaces are still required.
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -29,12 +34,22 @@ const RLIMIT_CPU: i32 = 0;
 const RLIMIT_AS: i32 = 9;
 const SIGKILL: i32 = 9;
 
+/// Guest-local caller identity and workload resource policy.
+///
+/// # Security
+///
+/// These settings do not replace a signed execution policy or attestation.
 pub struct Policy {
     allowed_uid: u32,
     max_memory_bytes: u64,
     max_cpu_seconds: u64,
 }
 impl Policy {
+    /// Loads policy from environment variables, rejecting invalid limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any configured value is malformed or out of range.
     pub fn from_env() -> io::Result<Self> {
         let uid = unsafe { geteuid() };
         let allowed_uid = std::env::var("GAMMACLOUD_RUNTIME_ALLOWED_UID")
@@ -64,6 +79,11 @@ impl Policy {
             max_cpu_seconds: cpu_seconds,
         })
     }
+    /// Checks Linux peer credentials for a guest-local Unix connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel cannot provide valid credentials.
     pub fn authorize(&self, stream: &UnixStream) -> io::Result<bool> {
         let mut cred = UCred {
             pid: 0,
@@ -88,10 +108,16 @@ impl Policy {
         }
         Ok(cred.uid == self.allowed_uid)
     }
+    /// Installs pre-exec CPU and virtual-memory limits for a child process.
+    ///
+    /// # Security
+    ///
+    /// RLIMIT_AS is not a cgroup memory limit; this does not sandbox a process.
     pub fn configure(&self, cmd: &mut Command) {
         use std::os::unix::process::CommandExt;
         let memory = self.max_memory_bytes;
         let cpu = self.max_cpu_seconds;
+        // SECURITY: Pre-exec hooks run after fork; keep this closure minimal.
         unsafe {
             cmd.pre_exec(move || {
                 if setsid() == -1 {
@@ -116,6 +142,11 @@ impl Policy {
         }
     }
 }
+/// Sends SIGKILL to the process group created for a workload.
+///
+/// # Errors
+///
+/// Returns an error for invalid IDs or kernel errors other than ESRCH.
 pub fn kill_process_group(pid: u32) -> io::Result<()> {
     let id = i32::try_from(pid).map_err(|_| io::Error::other("invalid process id"))?;
     if unsafe { kill(-id, SIGKILL) } == -1 {
