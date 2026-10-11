@@ -24,51 +24,107 @@ struct Manager {
     log_dir: PathBuf,
 }
 impl Manager {
-    fn new(log_dir: PathBuf) -> Self { Self { jobs: BTreeMap::new(), next_id: 1, log_dir } }
+    fn new(log_dir: PathBuf) -> Self {
+        Self {
+            jobs: BTreeMap::new(),
+            next_id: 1,
+            log_dir,
+        }
+    }
     fn start(&mut self, profile: Profile) -> std::io::Result<String> {
-        if self.jobs.len() >= MAX_WORKLOADS { return Ok("ERR capacity-exceeded\n".into()); }
+        if self.jobs.len() >= MAX_WORKLOADS {
+            return Ok("ERR capacity-exceeded\n".into());
+        }
         fs::create_dir_all(&self.log_dir)?;
         fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or_else(|| std::io::Error::other("id exhausted"))?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("id exhausted"))?;
         let stdout = self.log_dir.join(format!("{id}.stdout"));
         let stderr = self.log_dir.join(format!("{id}.stderr"));
         let out = File::create(&stdout)?;
         let err = File::create(&stderr)?;
         // Fixed development profiles only: never accept a caller-controlled executable or arguments.
         let mut cmd = match profile {
-            Profile::Smoke => { let mut c = Command::new("/usr/bin/printf"); c.arg("GAMMACLOUD_WORKLOAD_OK\n"); c }
-            Profile::Sleep => { let mut c = Command::new("/usr/bin/sleep"); c.arg("30"); c }
+            Profile::Smoke => {
+                let mut c = Command::new("/usr/bin/printf");
+                c.arg("GAMMACLOUD_WORKLOAD_OK\n");
+                c
+            }
+            Profile::Sleep => {
+                let mut c = Command::new("/usr/bin/sleep");
+                c.arg("30");
+                c
+            }
         };
-        let child = cmd.env_clear().stdin(Stdio::null()).stdout(Stdio::from(out))
-            .stderr(Stdio::from(err)).spawn()?;
-        self.jobs.insert(id, Workload { child, profile, stdout, stderr, exit_code: None });
+        let child = cmd
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .spawn()?;
+        self.jobs.insert(
+            id,
+            Workload {
+                child,
+                profile,
+                stdout,
+                stderr,
+                exit_code: None,
+            },
+        );
         Ok(format!("OK id={id} profile={}\n", profile.as_str()))
     }
     fn refresh(job: &mut Workload) -> std::io::Result<()> {
         if job.exit_code.is_none() {
-            if let Some(status) = job.child.try_wait()? { job.exit_code = Some(status.code().unwrap_or(-1)); }
+            if let Some(status) = job.child.try_wait()? {
+                job.exit_code = Some(status.code().unwrap_or(-1));
+            }
         }
         Ok(())
     }
     fn status(&mut self, id: u64) -> std::io::Result<String> {
-        let Some(job) = self.jobs.get_mut(&id) else { return Ok("ERR unknown-id\n".into()); };
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return Ok("ERR unknown-id\n".into());
+        };
         Self::refresh(job)?;
-        let state = if job.exit_code.is_some() { "exited" } else { "running" };
-        Ok(format!("OK id={id} profile={} state={state} exit_code={}\n", job.profile.as_str(),
-            job.exit_code.map_or_else(|| "none".to_string(), |c| c.to_string())))
+        let state = if job.exit_code.is_some() {
+            "exited"
+        } else {
+            "running"
+        };
+        Ok(format!(
+            "OK id={id} profile={} state={state} exit_code={}\n",
+            job.profile.as_str(),
+            job.exit_code
+                .map_or_else(|| "none".to_string(), |c| c.to_string())
+        ))
     }
     fn logs(&self, id: u64) -> std::io::Result<String> {
-        let Some(job) = self.jobs.get(&id) else { return Ok("ERR unknown-id\n".into()); };
+        let Some(job) = self.jobs.get(&id) else {
+            return Ok("ERR unknown-id\n".into());
+        };
         fn read_bounded(path: &Path) -> std::io::Result<String> {
             let mut bytes = Vec::new();
-            File::open(path)?.take(MAX_LOG_BYTES).read_to_end(&mut bytes)?;
-            Ok(String::from_utf8_lossy(&bytes).replace('\n', "\\n").replace('\r', "\\r"))
+            File::open(path)?
+                .take(MAX_LOG_BYTES)
+                .read_to_end(&mut bytes)?;
+            Ok(String::from_utf8_lossy(&bytes)
+                .replace('\n', "\\n")
+                .replace('\r', "\\r"))
         }
-        Ok(format!("OK stdout={} stderr={}\n", read_bounded(&job.stdout)?, read_bounded(&job.stderr)?))
+        Ok(format!(
+            "OK stdout={} stderr={}\n",
+            read_bounded(&job.stdout)?,
+            read_bounded(&job.stderr)?
+        ))
     }
     fn stop(&mut self, id: u64) -> std::io::Result<String> {
-        let Some(job) = self.jobs.get_mut(&id) else { return Ok("ERR unknown-id\n".into()); };
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return Ok("ERR unknown-id\n".into());
+        };
         Self::refresh(job)?;
         if job.exit_code.is_none() {
             job.child.kill()?;
@@ -91,14 +147,25 @@ fn main() -> std::io::Result<()> {
     let path = std::env::var("GAMMACLOUD_RUNTIME_SOCKET")
         .unwrap_or_else(|_| "/run/gammacloud/runtime.sock".into());
     let socket = Path::new(&path);
-    if let Some(parent) = socket.parent() { fs::create_dir_all(parent)?; }
-    if socket.exists() { return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "socket exists; refusing to remove an unknown endpoint")); }
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if socket.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "socket exists; refusing to remove an unknown endpoint",
+        ));
+    }
     let listener = UnixListener::bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
-        .map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
     let mut manager = Manager::new(log_dir);
-    println!("gammacloud-runtime state={} attestation=unverified confidential=false", GuestState::Ready.as_str());
+    println!(
+        "gammacloud-runtime state={} attestation=unverified confidential=false",
+        GuestState::Ready.as_str()
+    );
     let mut stopping = false;
     for incoming in listener.incoming() {
         let mut stream = incoming?;
@@ -109,7 +176,10 @@ fn main() -> std::io::Result<()> {
         let response = match parse_request(&request) {
             Ok(Request::Health) => "OK\n".into(),
             Ok(Request::Status) => "state=ready attestation=unverified confidential=false\n".into(),
-            Ok(Request::Shutdown) => { stopping = true; "state=stopping\n".into() },
+            Ok(Request::Shutdown) => {
+                stopping = true;
+                "state=stopping\n".into()
+            }
             Ok(Request::Start { profile }) => manager.start(profile)?,
             Ok(Request::WorkloadStatus { id }) => manager.status(id)?,
             Ok(Request::WorkloadLogs { id }) => manager.logs(id)?,
@@ -117,7 +187,9 @@ fn main() -> std::io::Result<()> {
             Err(err) => format!("ERR {err}\n"),
         };
         stream.write_all(response.as_bytes())?;
-        if stopping { break; }
+        if stopping {
+            break;
+        }
     }
     manager.shutdown();
     fs::remove_file(socket)?;
@@ -127,8 +199,10 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn lifecycle_and_allowlist() {
-        let dir = std::env::temp_dir().join(format!("gammacloud-runtime-test-{}", std::process::id()));
+    #[test]
+    fn lifecycle_and_allowlist() {
+        let dir =
+            std::env::temp_dir().join(format!("gammacloud-runtime-test-{}", std::process::id()));
         let mut manager = Manager::new(dir.clone());
         let start = manager.start(Profile::Smoke).unwrap();
         assert!(start.contains("id=1"));
