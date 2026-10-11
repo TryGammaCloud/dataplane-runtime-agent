@@ -30,12 +30,14 @@ pub enum Request {
 pub enum Profile {
     Smoke,
     Sleep,
+    Worker,
 }
 impl Profile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Smoke => "smoke",
             Self::Sleep => "sleep",
+            Self::Worker => "worker",
         }
     }
 }
@@ -53,6 +55,9 @@ pub fn parse_request(line: &str) -> Result<Request, &'static str> {
         }),
         ["START", "sleep"] => Ok(Request::Start {
             profile: Profile::Sleep,
+        }),
+        ["START", "worker"] => Ok(Request::Start {
+            profile: Profile::Worker,
         }),
         ["WORKLOAD_STATUS", id] => Ok(Request::WorkloadStatus {
             id: id.parse().map_err(|_| "invalid-id")?,
