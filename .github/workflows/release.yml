@@ -45,6 +45,16 @@ jobs:
           test -s runtime-sbom.spdx.json
           sha256sum -c runtime-linux-x86_64.tar.gz.sha256
           ( cd dist && sha256sum -c SHA256SUMS )
+      - name: Check GitHub attestation eligibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VISIBILITY="$(gh api repos/${{ github.repository }} --jq .visibility)"
+          if [[ "$VISIBILITY" != "public" ]]; then
+            echo "::error::GitHub artifact attestations are unavailable for this private repository on the current organization plan. Make the runtime repository public or enable a plan with private attestation support."
+            exit 1
+          fi
       - name: Attest release bundle provenance
         uses: actions/attest-build-provenance@v2
         with:
