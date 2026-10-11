@@ -238,7 +238,10 @@ mod tests {
     fn models_rejects_execution() {
         let dir = std::env::temp_dir();
         let mut manager = Manager::new(dir, Policy::from_env().unwrap(), product::Product::Models);
-        assert_eq!(manager.start(Profile::Smoke).unwrap(), "ERR workload-not-allowed-for-product\\n");
+        assert_eq!(
+            manager.start(Profile::Smoke).unwrap(),
+            "ERR workload-not-allowed-for-product\n"
+        );
     }
     #[test]
     fn lifecycle_and_allowlist() {
