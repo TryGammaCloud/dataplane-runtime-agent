@@ -51,3 +51,11 @@ The runtime defaults to the effective UID of the runtime process. Override with 
 3. Workload packages, volume/persistence interfaces and audit logs.
 4. Hardware SEV-SNP attestation, measured release and secrets gating.
 5. Pin and integrate a reviewed runtime release into `dataplane-os`.
+
+## Development-only vsock bridge
+
+Set `GAMMACLOUD_DEV_VSOCK_BRIDGE=1` **inside a disposable, unverified development guest** to expose TCP-like AF_VSOCK port 4050. The bridge forwards one bounded protocol command per connection to `/run/gammacloud/runtime.sock`. The guest-local UID policy remains enforced on that Unix socket.
+
+**Not production-safe:** The bridge does not authenticate the host or verify AMD SEV-SNP attestation. Never enable it for customer workloads or secrets. This bridge is not enabled by default. The guest image must include this runtime binary and configure the environment flag explicitly for development.
+
+The host-side development launcher and client are in `dataplane-node-agent/scripts/dev-vm.py`. This is a transport increment; end-to-end QEMU/NixOS validation is required before calling the integration complete.
