@@ -1,4 +1,6 @@
+mod security;
 use gammacloud_protocol::{parse_request, GuestState, Profile, Request};
+use security::{kill_process_group, Policy};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,13 +24,15 @@ struct Manager {
     jobs: BTreeMap<u64, Workload>,
     next_id: u64,
     log_dir: PathBuf,
+    policy: Policy,
 }
 impl Manager {
-    fn new(log_dir: PathBuf) -> Self {
+    fn new(log_dir: PathBuf, policy: Policy) -> Self {
         Self {
             jobs: BTreeMap::new(),
             next_id: 1,
             log_dir,
+            policy,
         }
     }
     fn start(&mut self, profile: Profile) -> std::io::Result<String> {
@@ -58,7 +62,9 @@ impl Manager {
                 c.arg("30");
                 c
             }
+            Profile::Worker => Command::new("/opt/gammacloud/workloads/worker"),
         };
+        self.policy.configure(&mut cmd);
         let child = cmd
             .env_clear()
             .stdin(Stdio::null())
@@ -127,7 +133,7 @@ impl Manager {
         };
         Self::refresh(job)?;
         if job.exit_code.is_none() {
-            job.child.kill()?;
+            kill_process_group(job.child.id())?;
             let status = job.child.wait()?;
             job.exit_code = Some(status.code().unwrap_or(-1));
         }
@@ -136,7 +142,7 @@ impl Manager {
     fn shutdown(&mut self) {
         for job in self.jobs.values_mut() {
             if job.exit_code.is_none() {
-                let _ = job.child.kill();
+                let _ = kill_process_group(job.child.id());
                 let _ = job.child.wait();
             }
         }
@@ -161,7 +167,7 @@ fn main() -> std::io::Result<()> {
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
-    let mut manager = Manager::new(log_dir);
+    let mut manager = Manager::new(log_dir, Policy::from_env()?);
     println!(
         "gammacloud-runtime state={} attestation=unverified confidential=false",
         GuestState::Ready.as_str()
@@ -169,6 +175,10 @@ fn main() -> std::io::Result<()> {
     let mut stopping = false;
     for incoming in listener.incoming() {
         let mut stream = incoming?;
+        if !manager.policy.authorize(&stream)? {
+            stream.write_all(b"ERR unauthorized-peer\n")?;
+            continue;
+        }
         stream.set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut request = String::new();
         // Bound the request before allocating unbounded memory.
@@ -203,7 +213,7 @@ mod tests {
     fn lifecycle_and_allowlist() {
         let dir =
             std::env::temp_dir().join(format!("gammacloud-runtime-test-{}", std::process::id()));
-        let mut manager = Manager::new(dir.clone());
+        let mut manager = Manager::new(dir.clone(), Policy::from_env().unwrap());
         let start = manager.start(Profile::Smoke).unwrap();
         assert!(start.contains("id=1"));
         let status = manager.status(1).unwrap();
