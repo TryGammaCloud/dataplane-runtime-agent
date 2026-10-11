@@ -4,6 +4,7 @@
 //!
 //! This Unix socket is not a host-to-guest authenticated transport.
 //! Development guests report attestation=unverified and confidential=false.
+mod dev_vsock;
 mod security;
 use gammacloud_protocol::{parse_request, GuestState, Profile, Request};
 use security::{kill_process_group, Policy};
@@ -182,6 +183,9 @@ fn main() -> std::io::Result<()> {
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
+    // SECURITY: The vsock bridge is opt-in and development-only.
+    // It does not authenticate the host or verify guest attestation.
+    dev_vsock::spawn(socket.to_path_buf())?;
     let mut manager = Manager::new(log_dir, Policy::from_env()?);
     println!(
         "gammacloud-runtime state={} attestation=unverified confidential=false",
