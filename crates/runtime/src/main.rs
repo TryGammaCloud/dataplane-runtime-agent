@@ -5,6 +5,7 @@
 //! This Unix socket is not a host-to-guest authenticated transport.
 //! Development guests report attestation=unverified and confidential=false.
 mod dev_vsock;
+mod product;
 mod security;
 use gammacloud_protocol::{parse_request, GuestState, Profile, Request};
 use security::{kill_process_group, Policy};
@@ -34,14 +35,16 @@ struct Manager {
     next_id: u64,
     log_dir: PathBuf,
     policy: Policy,
+    product: product::Product,
 }
 impl Manager {
-    fn new(log_dir: PathBuf, policy: Policy) -> Self {
+    fn new(log_dir: PathBuf, policy: Policy, product: product::Product) -> Self {
         Self {
             jobs: BTreeMap::new(),
             next_id: 1,
             log_dir,
             policy,
+            product,
         }
     }
     /// Starts an allowlisted profile with policy limits applied before spawn.
@@ -50,6 +53,9 @@ impl Manager {
     ///
     /// Returns an error if log creation, policy setup or spawning fails.
     fn start(&mut self, profile: Profile) -> std::io::Result<String> {
+        if !self.product.allows_workload() {
+            return Ok("ERR workload-not-allowed-for-product\n".into());
+        }
         if self.jobs.len() >= MAX_WORKLOADS {
             return Ok("ERR capacity-exceeded\n".into());
         }
@@ -186,7 +192,7 @@ fn main() -> std::io::Result<()> {
     // SECURITY: The vsock bridge is opt-in and development-only.
     // It does not authenticate the host or verify guest attestation.
     dev_vsock::spawn(socket.to_path_buf())?;
-    let mut manager = Manager::new(log_dir, Policy::from_env()?);
+    let mut manager = Manager::new(log_dir, Policy::from_env()?, product::load()?);
     println!(
         "gammacloud-runtime state={} attestation=unverified confidential=false",
         GuestState::Ready.as_str()
@@ -229,10 +235,23 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn models_rejects_execution() {
+        let dir = std::env::temp_dir();
+        let mut manager = Manager::new(dir, Policy::from_env().unwrap(), product::Product::Models);
+        assert_eq!(
+            manager.start(Profile::Smoke).unwrap(),
+            "ERR workload-not-allowed-for-product\n"
+        );
+    }
+    #[test]
     fn lifecycle_and_allowlist() {
         let dir =
             std::env::temp_dir().join(format!("gammacloud-runtime-test-{}", std::process::id()));
-        let mut manager = Manager::new(dir.clone(), Policy::from_env().unwrap());
+        let mut manager = Manager::new(
+            dir.clone(),
+            Policy::from_env().unwrap(),
+            product::Product::Sandbox,
+        );
         let start = manager.start(Profile::Smoke).unwrap();
         assert!(start.contains("id=1"));
         let status = manager.status(1).unwrap();
