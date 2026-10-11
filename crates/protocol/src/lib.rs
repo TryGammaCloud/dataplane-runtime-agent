@@ -1,29 +1,54 @@
-//! Development-only guest lifecycle protocol. No attestation claims.
+//! Local development protocol v1. Not a remote or attested interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuestState {
-    Starting,
-    Ready,
-    Stopping,
-    Stopped,
-}
-
+pub enum GuestState { Starting, Ready, Stopping, Stopped }
 impl GuestState {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Starting => "starting",
-            Self::Ready => "ready",
-            Self::Stopping => "stopping",
-            Self::Stopped => "stopped",
-        }
+        match self { Self::Starting => "starting", Self::Ready => "ready", Self::Stopping => "stopping", Self::Stopped => "stopped" }
     }
 }
-
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Health,
+    Status,
+    Shutdown,
+    Start { profile: Profile },
+    WorkloadStatus { id: u64 },
+    WorkloadLogs { id: u64 },
+    Stop { id: u64 },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile { Smoke, Sleep }
+impl Profile {
+    pub fn as_str(self) -> &'static str { match self { Self::Smoke => "smoke", Self::Sleep => "sleep" } }
+}
+pub fn parse_request(line: &str) -> Result<Request, &'static str> {
+    if line.len() > 256 || !line.is_ascii() { return Err("invalid-request"); }
+    let tokens: Vec<_> = line.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["HEALTH"] => Ok(Request::Health),
+        ["STATUS"] => Ok(Request::Status),
+        ["SHUTDOWN"] => Ok(Request::Shutdown),
+        ["START", "smoke"] => Ok(Request::Start { profile: Profile::Smoke }),
+        ["START", "sleep"] => Ok(Request::Start { profile: Profile::Sleep }),
+        ["WORKLOAD_STATUS", id] => Ok(Request::WorkloadStatus { id: id.parse().map_err(|_| "invalid-id")? }),
+        ["WORKLOAD_LOGS", id] => Ok(Request::WorkloadLogs { id: id.parse().map_err(|_| "invalid-id")? }),
+        ["STOP", id] => Ok(Request::Stop { id: id.parse().map_err(|_| "invalid-id")? }),
+        _ => Err("unsupported-command"),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn states_have_stable_names() {
-        assert_eq!(GuestState::Starting.as_str(), "starting");
-        assert_eq!(GuestState::Ready.as_str(), "ready");
+    #[test] fn states_have_stable_names() { assert_eq!(GuestState::Ready.as_str(), "ready"); }
+    #[test] fn parses_workload_commands() {
+        assert_eq!(parse_request("START smoke\n"), Ok(Request::Start { profile: Profile::Smoke }));
+        assert_eq!(parse_request("STOP 42"), Ok(Request::Stop { id: 42 }));
+        assert_eq!(parse_request("WORKLOAD_STATUS 42"), Ok(Request::WorkloadStatus { id: 42 }));
+        assert_eq!(parse_request("WORKLOAD_LOGS 42"), Ok(Request::WorkloadLogs { id: 42 }));
+    }
+    #[test] fn rejects_untrusted_commands() {
+        assert!(parse_request("START /bin/sh").is_err());
+        assert!(parse_request("START smoke extra").is_err());
+        assert!(parse_request(&"a".repeat(257)).is_err());
     }
 }
