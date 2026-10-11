@@ -62,6 +62,7 @@ impl Manager {
                 c.arg("30");
                 c
             }
+            Profile::Worker => Command::new("/opt/gammacloud/workloads/worker"),
         };
         self.policy.configure(&mut cmd);
         let child = cmd
