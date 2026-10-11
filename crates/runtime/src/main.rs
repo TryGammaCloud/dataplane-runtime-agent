@@ -37,7 +37,7 @@ impl Manager {
         let err = File::create(&stderr)?;
         // Fixed development profiles only: never accept a caller-controlled executable or arguments.
         let mut cmd = match profile {
-            Profile::Smoke => { let mut c = Command::new("/usr/bin/printf"); c.arg("GAMMACLOUD_WORKLOAD_OK\\n"); c }
+            Profile::Smoke => { let mut c = Command::new("/usr/bin/printf"); c.arg("GAMMACLOUD_WORKLOAD_OK\n"); c }
             Profile::Sleep => { let mut c = Command::new("/usr/bin/sleep"); c.arg("30"); c }
         };
         let child = cmd.env_clear().stdin(Stdio::null()).stdout(Stdio::from(out))
@@ -63,7 +63,7 @@ impl Manager {
         fn read_bounded(path: &Path) -> std::io::Result<String> {
             let mut bytes = Vec::new();
             File::open(path)?.take(MAX_LOG_BYTES).read_to_end(&mut bytes)?;
-            Ok(String::from_utf8_lossy(&bytes).replace('\\n', "\\n").replace('\\r', "\\r"))
+            Ok(String::from_utf8_lossy(&bytes).replace('\n', "\\n").replace('\r', "\\r"))
         }
         Ok(format!("OK stdout={} stderr={}\n", read_bounded(&job.stdout)?, read_bounded(&job.stderr)?))
     }
