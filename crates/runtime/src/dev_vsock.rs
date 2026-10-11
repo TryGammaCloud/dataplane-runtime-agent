@@ -76,7 +76,13 @@ pub fn spawn(local_socket: PathBuf) -> io::Result<()> {
         // LIFECYCLE: The process owns the listener; it closes on runtime exit.
         let listener = unsafe { std::fs::File::from_raw_fd(fd) };
         loop {
-            let client = unsafe { accept(std::os::fd::AsRawFd::as_raw_fd(&listener), std::ptr::null_mut(), std::ptr::null_mut()) };
+            let client = unsafe {
+                accept(
+                    std::os::fd::AsRawFd::as_raw_fd(&listener),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
             if client < 0 {
                 break;
             }
