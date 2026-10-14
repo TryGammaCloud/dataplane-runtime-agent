@@ -15,15 +15,20 @@ pub fn serve() -> std::io::Result<()> {
     let path = std::env::var("GAMMACLOUD_RUNTIME_SOCKET")
         .unwrap_or_else(|_| "/run/gammacloud/runtime.sock".into());
     let socket = Path::new(&path);
-    if let Some(parent) = socket.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = socket.parent() {
+        fs::create_dir_all(parent)?;
+    }
     if socket.exists() {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists,
-            "socket exists; refusing to remove an unknown endpoint"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "socket exists; refusing to remove an unknown endpoint",
+        ));
     }
     let listener = UnixListener::bind(socket)?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
-        .map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
     let result = serve_listener(&listener, socket, log_dir);
     let _ = fs::remove_file(socket);
     result
@@ -32,7 +37,10 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     let mut manager = Manager::new(log_dir, Policy::from_env()?, product::load()?);
     // SECURITY: The bridge is an unauthenticated development-only transport.
     dev_vsock::spawn(socket.to_path_buf())?;
-    println!("gammacloud-runtime state={} attestation=unverified confidential=false", GuestState::Ready.as_str());
+    println!(
+        "gammacloud-runtime state={} attestation=unverified confidential=false",
+        GuestState::Ready.as_str()
+    );
     for incoming in listener.incoming() {
         let mut stream = incoming?;
         if !manager.authorize(&stream)? {
@@ -53,7 +61,9 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
             Err(err) => format!("ERR {err}\n"),
         };
         stream.write_all(response.as_bytes())?;
-        if matches!(parse_request(&request), Ok(Request::Shutdown)) { break; }
+        if matches!(parse_request(&request), Ok(Request::Shutdown)) {
+            break;
+        }
     }
     manager.shutdown();
     println!("gammacloud-runtime state={}", GuestState::Stopped.as_str());
