@@ -4,7 +4,7 @@ use crate::security::{kill_process_group, Policy};
 use gammacloud_protocol::Profile;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
