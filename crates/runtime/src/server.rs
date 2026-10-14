@@ -35,7 +35,7 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     println!("gammacloud-runtime state={} attestation=unverified confidential=false", GuestState::Ready.as_str());
     for incoming in listener.incoming() {
         let mut stream = incoming?;
-        if !manager_policy_authorize(&manager, &stream)? {
+        if !manager.authorize(&stream)? {
             stream.write_all(b"ERR unauthorized-peer\n")?;
             continue;
         }
@@ -58,7 +58,4 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     manager.shutdown();
     println!("gammacloud-runtime state={}", GuestState::Stopped.as_str());
     Ok(())
-}
-fn manager_policy_authorize(manager: &Manager, stream: &std::os::unix::net::UnixStream) -> std::io::Result<bool> {
-    manager.authorize(stream)
 }
