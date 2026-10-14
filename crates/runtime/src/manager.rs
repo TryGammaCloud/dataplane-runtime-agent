@@ -140,7 +140,9 @@ impl Manager {
         ))
     }
     pub fn stop(&mut self, id: u64) -> std::io::Result<String> {
-        let Some(job) = self.jobs.get_mut(&id) else { return Ok("ERR unknown-id\n".into()); };
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return Ok("ERR unknown-id\n".into());
+        };
         Self::refresh(job)?;
         if job.exit_code.is_none() {
             kill_process_group(job.child.id())?;
