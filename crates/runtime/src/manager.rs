@@ -30,6 +30,9 @@ impl Manager {
     pub fn new(log_dir: PathBuf, policy: Policy, product: product::Product) -> Self {
         Self { jobs: BTreeMap::new(), next_id: 1, log_dir, policy, product }
     }
+    pub fn authorize(&self, stream: &std::os::unix::net::UnixStream) -> std::io::Result<bool> {
+        self.policy.authorize(stream)
+    }
     pub fn start(&mut self, profile: Profile) -> std::io::Result<String> {
         if !self.product.allows_workload() {
             return Ok("ERR workload-not-allowed-for-product\n".into());
