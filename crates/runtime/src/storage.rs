@@ -1,5 +1,6 @@
 //! Guest volume activation and descriptor-relative workspace operations.
 //! Disk keys arrive only as sealed descriptors from an image-provisioned broker.
+use crate::workspace::open_beneath;
 use gammacloud_protocol::structured::{FileOperation, SignedEnvelope};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
@@ -169,6 +170,16 @@ pub fn ready(id: &str, policy: &VolumePolicy) -> io::Result<File> {
     {
         return Err(denied());
     }
+    let metadata = root.metadata()?;
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(denied());
+    }
+    let workspace = open_beneath(&root, "workspace", libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+    let metadata = workspace.metadata()?;
+    if metadata.uid() != policy.uid || metadata.gid() != policy.gid || metadata.mode() & 0o077 != 0
+    {
+        return Err(denied());
+    }
     quota(&root, policy, false)?;
     Ok(root)
 }
@@ -206,6 +217,29 @@ fn quota(root: &File, policy: &VolumePolicy, set: bool) -> io::Result<()> {
     Ok(())
 }
 
+// An unsuccessful activation must not leave a newly opened mapping silently adopted.
+struct MappingCleanup {
+    name: String,
+    armed: bool,
+}
+impl Drop for MappingCleanup {
+    fn drop(&mut self) {
+        if self.armed
+            && crate::subprocess::output(
+                Command::new(CRYPTSETUP)
+                    .env_clear()
+                    .args(["close", "--", &self.name])
+                    .stdin(Stdio::null()),
+                Duration::from_secs(5),
+                1024,
+            )
+            .is_err()
+        {
+            eprintln!("gammacloud-runtime event=volume-cleanup-failed");
+        }
+    }
+}
+
 pub fn unlock(
     id: &str,
     policy: &VolumePolicy,
@@ -225,7 +259,12 @@ pub fn unlock(
     let fd = key.as_raw_fd();
     let mapping = format!("gc-{id}");
     let mapper = format!("/dev/mapper/{mapping}");
+    let mut cleanup = MappingCleanup {
+        name: mapping.clone(),
+        armed: false,
+    };
     if !Path::new(&mapper).exists() {
+        cleanup.armed = true;
         let mut command = Command::new(CRYPTSETUP);
         command
             .env_clear()
@@ -300,13 +339,28 @@ pub fn unlock(
     if result.is_err() {
         unsafe { libc::umount2(target.as_ptr(), 0) };
     }
+    if result.is_ok() {
+        cleanup.armed = false;
+    }
     result
 }
 
 pub fn lock(id: &str, policy: &VolumePolicy) -> io::Result<()> {
     validate(id, policy)?;
+    let mapper_path = format!("/dev/mapper/gc-{id}");
+    let mapper = match fs::metadata(&mapper_path) {
+        Ok(metadata) if metadata.file_type().is_block_device() => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        _ => return Err(denied()),
+    };
+    let path = Path::new(&policy.mount_path);
+    if fs::canonicalize(path)? != path {
+        return Err(denied());
+    }
     let target = cstring(&policy.mount_path)?;
-    if ready(id, policy).is_ok() && unsafe { libc::umount2(target.as_ptr(), 0) } != 0 {
+    if fs::metadata(path)?.dev() == mapper.rdev()
+        && unsafe { libc::umount2(target.as_ptr(), 0) } != 0
+    {
         return Err(io::Error::last_os_error());
     }
     // No lazy unmount: a busy workspace must remain explicitly busy.
@@ -319,46 +373,6 @@ pub fn lock(id: &str, policy: &VolumePolicy) -> io::Result<()> {
         1024,
     )
     .map(|_| ())
-}
-
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
-
-fn open_beneath(root: &File, path: &str, flags: i32, mode: u32) -> io::Result<File> {
-    let path = Path::new(path);
-    if path.is_absolute()
-        || path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_)))
-        || path.components().count() > 32
-    {
-        return Err(denied());
-    }
-    let path = cstring(path.to_str().ok_or_else(denied)?)?;
-    // RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS | NO_XDEV.
-    let how = OpenHow {
-        flags: (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) as u64,
-        mode: u64::from(mode),
-        resolve: 0x08 | 0x04 | 0x02 | 0x01,
-    };
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            root.as_raw_fd(),
-            path.as_ptr(),
-            &how,
-            std::mem::size_of_val(&how),
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd as i32) })
 }
 
 #[derive(Serialize, Deserialize)]

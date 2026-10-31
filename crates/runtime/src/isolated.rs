@@ -30,7 +30,7 @@ pub struct ExecutionTemplate {
     #[serde(default)]
     pub volume_id: Option<String>,
     #[serde(default)]
-    pub egress: crate::egress::EgressPolicy,
+    pub egress: crate::network_policy::NetworkPolicy,
     #[serde(default)]
     pub credentials: BTreeMap<String, CredentialPolicy>,
     #[serde(default)]
@@ -140,6 +140,7 @@ fn preflight(template: &ExecutionTemplate) -> io::Result<()> {
     if fs::canonicalize(root)? != root || !root.is_dir() {
         return Err(unavailable());
     }
+    crate::workspace::trusted_path(root)?;
     let metadata = root.metadata()?;
     if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
         return Err(unavailable());
@@ -148,6 +149,7 @@ fn preflight(template: &ExecutionTemplate) -> io::Result<()> {
     if fs::canonicalize(path)? != path {
         return Err(unavailable());
     }
+    crate::workspace::trusted_path(path)?;
     let metadata = path.metadata()?;
     if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
         return Err(unavailable());

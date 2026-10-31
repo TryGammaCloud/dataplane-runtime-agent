@@ -1,67 +1,31 @@
-//! GammaCloud development guest service entrypoint.
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
+//! Unified GammaCloud Sandbox/Models runtime and development guest entrypoint.
 mod attestation;
 mod authorization;
 mod dev_vsock;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod development_agent;
 mod egress;
 mod exec_guard;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod identity;
 mod inference;
 mod isolated;
 mod lease;
 mod lifecycle;
 mod manager;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod model_runtime;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod network_policy;
 mod observability;
 mod product;
 mod recovery;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod resilience;
 mod seccomp;
 mod security;
 mod server;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod session;
 mod snp;
 mod storage;
 mod subprocess;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod telemetry;
 mod terminal;
-#[allow(
-    dead_code,
-    reason = "Preserved compatibility scaffolding; operational adapters are separate modules."
-)]
 mod workspace;
 
 fn main() -> std::io::Result<()> {

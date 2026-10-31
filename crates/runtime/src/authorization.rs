@@ -34,7 +34,7 @@ pub struct TrustPolicy {
     #[serde(default)]
     pub execution_templates: crate::isolated::Templates,
     #[serde(default)]
-    pub development_agents: std::collections::BTreeMap<String, crate::terminal::AgentProfile>,
+    pub development_agents: crate::development_agent::DevelopmentAgentCatalog,
     #[serde(default)]
     pub volumes: std::collections::BTreeMap<String, crate::storage::VolumePolicy>,
 }
@@ -66,10 +66,8 @@ pub struct Authorization {
     owner: Option<OwnerBinding>,
     boot_nonce: String,
     state: PathBuf,
-    verified_until: u64,
-    verified_deadline: Option<std::time::Instant>,
+    attestation: crate::attestation::AttestationCoordinator,
     last_wall_time: u64,
-    decision: Option<SignedEnvelope>,
     journal_lock: File,
 }
 
@@ -261,10 +259,8 @@ impl Authorization {
             owner,
             boot_nonce: hex(&nonce),
             state,
-            verified_until: 0,
-            verified_deadline: None,
+            attestation: Default::default(),
             last_wall_time: now().map_err(|_| error())?,
-            decision: None,
             journal_lock,
         })
     }
@@ -292,20 +288,52 @@ impl Authorization {
             .filter_map(|(id, volume)| {
                 crate::storage::ready(id, volume)
                     .ok()
-                    .and_then(|_| crate::observability::disk_bytes(&volume.mount_path).ok())
+                    .and_then(|_| crate::telemetry::disk_bytes(&volume.mount_path).ok())
             })
             .collect()
     }
 
-    pub fn agent_profile(&self, name: &str) -> Option<&crate::terminal::AgentProfile> {
+    pub fn agent_profile(&self, name: &str) -> Option<&crate::development_agent::AgentProfile> {
         self.policy.development_agents.get(name)
+    }
+
+    pub fn reconcile_volumes(&self) -> io::Result<()> {
+        // Unknown owned mappings require operator reconciliation, never silent adoption.
+        match fs::read_dir("/dev/mapper") {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if let Some(id) = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.strip_prefix("gc-"))
+                    {
+                        if !self.policy.volumes.contains_key(id) {
+                            return Err(io::Error::other(
+                                "unconfigured runtime volume requires reconciliation",
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && self.policy.volumes.is_empty() => {}
+            Err(error) => return Err(error),
+        }
+        for (id, policy) in &self.policy.volumes {
+            crate::storage::lock(id, policy)?;
+        }
+        Ok(())
     }
 
     pub fn volume_policy(&self, id: &str) -> Option<&crate::storage::VolumePolicy> {
         self.policy.volumes.get(id)
     }
     pub fn current_decision(&self) -> Option<&SignedEnvelope> {
-        self.decision.as_ref().filter(|_| self.attested())
+        now()
+            .ok()
+            .filter(|time| *time >= self.last_wall_time)
+            .and_then(|time| self.attestation.current(time))
     }
 
     pub fn execution_template(&self, name: &str) -> Option<&crate::isolated::ExecutionTemplate> {
@@ -313,21 +341,15 @@ impl Authorization {
     }
 
     pub fn expire_decision(&mut self) -> bool {
-        if self.verified_until != 0 && !self.attested() {
-            self.verified_until = 0;
-            self.decision = None;
-            return true;
-        }
-        false
+        self.attestation
+            .expire(now().ok().filter(|time| *time >= self.last_wall_time))
     }
 
     pub fn boot_nonce(&self) -> &str {
         &self.boot_nonce
     }
     pub fn attested(&self) -> bool {
-        self.verified_deadline
-            .is_some_and(|deadline| std::time::Instant::now() < deadline)
-            && now().is_ok_and(|time| time >= self.last_wall_time && time < self.verified_until)
+        self.current_decision().is_some()
     }
 
     pub fn admit(&mut self, envelope: &SignedEnvelope) -> Result<Admission, &'static str> {
@@ -434,15 +456,21 @@ impl Authorization {
         Ok(Admission::Execute(Box::new(request)))
     }
 
-    pub fn evidence(&self, challenge: &str) -> Result<String, &'static str> {
+    pub fn evidence(
+        &mut self,
+        challenge: &str,
+        workload_digest: &str,
+    ) -> Result<String, &'static str> {
         decode::<32>(challenge)?;
+        decode::<32>(workload_digest)?;
+        self.attestation.invalidate();
         let owner = self
             .owner
             .as_ref()
             .filter(|owner| !owner.revoked)
             .ok_or("owner_unavailable")?;
         let context = serde_json::to_string(&serde_json::json!({
-            "challenge":challenge, "organization_id":self.policy.organization_id, "project_id":self.policy.project_id,
+            "challenge":challenge, "workload_digest":workload_digest, "organization_id":self.policy.organization_id, "project_id":self.policy.project_id,
             "sandbox_id":self.policy.sandbox_id, "guest_id":self.policy.guest_id, "boot_nonce":self.boot_nonce,
             "owner_public_key":owner.public_key, "owner_epoch":owner.epoch, "image_digest":self.policy.image_digest,
             "workload_identity":owner.workload_identity, "policy_version":self.policy.policy_version,
@@ -461,8 +489,19 @@ impl Authorization {
         .map_err(|_| "evidence_unavailable")?;
         let response: serde_json::Value =
             serde_json::from_slice(&output).map_err(|_| "evidence_unavailable")?;
-        serde_json::to_string(&serde_json::json!({"context":context,"evidence":response}))
-            .map_err(|_| "evidence_unavailable")
+        let report = response
+            .get("response_hex")
+            .and_then(|value| value.as_str())
+            .ok_or("evidence_unavailable")?;
+        // Hash the exact lowercase hex representation returned by the collector.
+        let digest = hex(&Sha256::digest(report.as_bytes()));
+        let time = now()?;
+        self.attestation
+            .record_evidence(challenge, digest.clone(), workload_digest, time);
+        serde_json::to_string(
+            &serde_json::json!({"context":context,"evidence":response,"evidence_digest":digest}),
+        )
+        .map_err(|_| "evidence_unavailable")
     }
 
     pub fn outcome(&self, id: &str) -> Result<String, &'static str> {
@@ -523,9 +562,7 @@ impl Authorization {
         )
         .map_err(|_| "state_unavailable")?;
         self.owner = Some(owner);
-        self.verified_until = 0;
-        self.verified_deadline = None;
-        self.decision = None;
+        self.attestation.invalidate();
         Ok(())
     }
 
@@ -613,13 +650,12 @@ impl Authorization {
                 {
                     return Err("decision_binding_mismatch");
                 }
-                self.verified_until = decision.expires_at;
-                self.verified_deadline = Some(
-                    std::time::Instant::now()
-                        + std::time::Duration::from_secs(decision.expires_at - time),
-                );
                 if let Operation::Attest { decision } = &request.operation {
-                    self.decision = Some(decision.clone());
+                    self.attestation.verify_decision(
+                        &self.policy.verifier_public_key,
+                        decision,
+                        time,
+                    )?;
                 }
             }
             _ => return Ok(false),
@@ -819,6 +855,8 @@ mod tests {
         f.enroll();
         let time = now().unwrap();
         let decision = AttestationDecision {
+            challenge: "challenge".into(),
+            evidence_digest: "evidence".into(),
             guest_id: "guest".into(),
             boot_nonce: f.authorization.boot_nonce.clone(),
             owner_public_key: hex(f.owner.verifying_key().as_bytes()),
@@ -850,8 +888,23 @@ mod tests {
                 },
             },
         );
+        assert_eq!(
+            f.authorization.identity_operation(&request),
+            Err("fresh_evidence_required")
+        );
+        assert!(!f.authorization.attested());
+        f.authorization.attestation.record_evidence(
+            "challenge",
+            "evidence".into(),
+            "sha256:expected-workload",
+            time,
+        );
         f.authorization.identity_operation(&request).unwrap();
         assert!(f.authorization.attested());
+        assert_eq!(
+            f.authorization.identity_operation(&request),
+            Err("fresh_evidence_required")
+        );
     }
 
     #[test]

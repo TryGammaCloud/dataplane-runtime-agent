@@ -94,6 +94,7 @@ pub enum Operation {
     },
     Evidence {
         challenge: String,
+        workload_digest: String,
     },
     Metrics,
     RequestOutcome {
@@ -162,6 +163,8 @@ impl Operation {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationDecision {
+    pub challenge: String,
+    pub evidence_digest: String,
     pub guest_id: String,
     pub boot_nonce: String,
     pub owner_public_key: String,
@@ -174,6 +177,46 @@ pub struct AttestationDecision {
     pub expires_at: u64,
 }
 
+/// Stable machine-readable error category; `code` retains the precise diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    Unauthorized,
+    InvalidRequest,
+    Conflict,
+    Unavailable,
+    Internal,
+}
+
+impl ErrorKind {
+    fn from_code(code: &str) -> Self {
+        match code {
+            "invalid_signature"
+            | "invalid_public_key"
+            | "owner_unavailable"
+            | "stale_owner_epoch"
+            | "attestation_required"
+            | "fresh_evidence_required"
+            | "decision_binding_mismatch"
+            | "evidence_binding_mismatch"
+            | "binding_mismatch"
+            | "request_expired"
+            | "clock_rollback"
+            | "isolated_execution_required" => Self::Unauthorized,
+            "request_id_conflict" | "outcome_unknown" | "owner_already_bound" => Self::Conflict,
+            _ if code.ends_with("_denied") => Self::Unauthorized,
+            _ if code.starts_with("invalid_")
+                || code == "unsupported_version"
+                || code.ends_with("_too_large") =>
+            {
+                Self::InvalidRequest
+            }
+            _ if code.ends_with("_unavailable") || code == "journal_full" => Self::Unavailable,
+            _ => Self::Internal,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
@@ -181,6 +224,8 @@ pub struct Response {
     pub request_id: String,
     pub ok: bool,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<ErrorKind>,
     pub result: String,
 }
 
@@ -198,6 +243,7 @@ impl Response {
             request_id: id.into(),
             ok: false,
             code: code.into(),
+            error_kind: Some(ErrorKind::from_code(code)),
             result: String::new(),
         }
     }
@@ -207,6 +253,7 @@ impl Response {
             request_id: id.into(),
             ok: true,
             code: "ok".into(),
+            error_kind: None,
             result,
         }
     }
@@ -249,4 +296,28 @@ pub struct InferenceManifest {
     pub artifacts: Vec<ModelArtifact>,
     pub health_port: u16,
     pub health_path: String,
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn errors_have_stable_typed_categories_and_bounded_frames() {
+        assert_eq!(
+            Response::error("id", "attestation_required").error_kind,
+            Some(ErrorKind::Unauthorized)
+        );
+        assert_eq!(
+            Response::error("id", "request_id_conflict").error_kind,
+            Some(ErrorKind::Conflict)
+        );
+        assert_eq!(
+            Response::error("id", "evidence_unavailable").error_kind,
+            Some(ErrorKind::Unavailable)
+        );
+        let response = Response::success("id", "x".repeat(MAX_FRAME_BYTES)).bounded();
+        assert_eq!(response.code, "response_too_large");
+        assert!(serde_json::to_vec(&response).unwrap().len() < MAX_FRAME_BYTES);
+    }
 }

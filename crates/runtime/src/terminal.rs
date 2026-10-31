@@ -4,20 +4,12 @@ use crate::isolated::ExecutionTemplate;
 use crate::manager::Manager;
 use crate::storage::VolumePolicy;
 use gammacloud_protocol::structured::ExecutionManifest;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentProfile {
-    pub template: String,
-    pub version: String,
-}
 
 struct Terminal {
     master: File,
@@ -43,7 +35,14 @@ fn rejected() -> io::Error {
 
 impl Terminals {
     pub fn len(&self) -> usize {
-        self.sessions.len()
+        self.sessions
+            .values()
+            .filter(|session| {
+                !session.closed
+                    && Instant::now() < session.expires
+                    && session.idle.elapsed() < Duration::from_secs(120)
+            })
+            .count()
     }
 
     pub fn open(
@@ -99,7 +98,9 @@ impl Terminals {
         if self.sessions.contains_key(&id) {
             return Err(rejected());
         }
-        let response = manager.execute(manifest, template, volume, Some(slave), authorization)?;
+        let mut effective = manifest.clone();
+        effective.timeout_seconds = effective.timeout_seconds.min(ttl_seconds);
+        let response = manager.execute(&effective, template, volume, Some(slave), authorization)?;
         if response.starts_with("ERR ") {
             return Err(rejected());
         }
@@ -255,5 +256,101 @@ impl Terminals {
         }
         session.idle = Instant::now();
         Ok("resized".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn process_pty_io_replay_and_expiration() {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        let master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            assert_ne!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                -1
+            );
+        }
+        let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut settings) },
+            0
+        );
+        unsafe { libc::cfmakeraw(&mut settings) };
+        assert_eq!(
+            unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &settings) },
+            0
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+            -1
+        );
+        let _process = Process(
+            Command::new("/bin/cat")
+                .env_clear()
+                .stdin(Stdio::from(slave.try_clone().unwrap()))
+                .stdout(Stdio::from(slave.try_clone().unwrap()))
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        drop(slave);
+        let mut sessions = Terminals::default();
+        sessions.sessions.insert(
+            "test".into(),
+            Terminal {
+                master,
+                job: 0,
+                expires: Instant::now() + Duration::from_secs(5),
+                idle: Instant::now(),
+                buffer: VecDeque::new(),
+                base: 0,
+                emitted: 0,
+                next_sequence: 0,
+                last_input: None,
+                closed: false,
+            },
+        );
+        let first = sessions.write("test", 0, "6869").unwrap();
+        assert_eq!(sessions.write("test", 0, "6869").unwrap(), first);
+        assert!(sessions.write("test", 0, "78").is_err());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let response: serde_json::Value =
+                serde_json::from_str(&sessions.read("test", 0).unwrap()).unwrap();
+            if response["data_hex"] == "6869" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "PTY child did not echo input");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sessions.sessions.get_mut("test").unwrap().expires = Instant::now();
+        assert!(sessions.read("test", 0).is_err());
+        assert!(sessions.write("test", 1, "78").is_err());
     }
 }

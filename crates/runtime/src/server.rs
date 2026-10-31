@@ -1,15 +1,12 @@
 //! Guest local Unix protocol server and optional development-only vsock bridge.
-use crate::attestation::AttestationCoordinator;
 use crate::authorization::{Admission, Authorization};
 use crate::dev_vsock;
 use crate::identity::OwnerIdentity;
 use crate::lifecycle;
 use crate::manager::Manager;
-use crate::network_policy::NetworkPolicy;
 use crate::product;
 use crate::security::Policy;
 use crate::session::SessionManager;
-use crate::telemetry::TelemetryCollector;
 use gammacloud_protocol::structured::{Operation, Response, SignedEnvelope};
 use gammacloud_protocol::{GuestState, Request, RequestEnvelope};
 use std::fs;
@@ -23,20 +20,11 @@ use std::time::Duration;
 
 struct RuntimeContext {
     authorization: Option<Authorization>,
-    terminals: crate::terminal::Terminals,
-    models: crate::inference::Models,
+    terminals: SessionManager,
+    models: crate::model_runtime::Models,
     last_export: std::time::Instant,
     manager: Manager,
-    session_manager: SessionManager,
-    #[allow(
-        dead_code,
-        reason = "Stored identity awaits verified command authorization."
-    )]
     owner_identity: Option<OwnerIdentity>,
-    attestation: AttestationCoordinator,
-    network_policy: NetworkPolicy,
-    #[allow(dead_code, reason = "Collector awaits resource sampling integration.")]
-    telemetry: TelemetryCollector,
 }
 
 impl RuntimeContext {
@@ -47,14 +35,11 @@ impl RuntimeContext {
         } else {
             None
         };
-        let mut session_manager = SessionManager::new();
-        if let Some(identity) = owner_identity.clone() {
-            let _ = session_manager.create("runtime-session", identity, Duration::from_secs(3600));
-        }
-        let network_policy = NetworkPolicy::from_env().unwrap_or_else(|_| NetworkPolicy::new());
         let mut manager = Manager::new(log_dir, Policy::from_env()?, product);
-        if authorization.is_some() {
+        if let Some(authorization) = &authorization {
             manager.enable_recovery()?;
+            // Stop tracked units before unmounting; do not resume authority after restart.
+            authorization.reconcile_volumes()?;
         }
         Ok(Self {
             authorization,
@@ -62,11 +47,7 @@ impl RuntimeContext {
             models: Default::default(),
             manager,
             last_export: std::time::Instant::now(),
-            session_manager,
             owner_identity,
-            attestation: AttestationCoordinator::new(),
-            network_policy,
-            telemetry: TelemetryCollector::new(64),
         })
     }
 
@@ -75,8 +56,6 @@ impl RuntimeContext {
             return Ok(false);
         }
         if self.authorization.is_none()
-            && self.network_policy.require_attestation
-            && self.attestation.state != crate::attestation::AttestationState::Verified
             && std::env::var("GAMMACLOUD_REQUIRE_ATTESTATION").as_deref() == Ok("1")
         {
             return Ok(false);
@@ -92,20 +71,22 @@ impl RuntimeContext {
                 "unverified"
             }
         } else {
-            match self.attestation.state {
-                crate::attestation::AttestationState::Verified => "verified",
-                crate::attestation::AttestationState::Pending => "pending",
-                crate::attestation::AttestationState::Rejected => "rejected",
-                crate::attestation::AttestationState::Unverified => "unverified",
-            }
+            "unverified"
         };
-        let session_count = self.session_manager.list_active().len();
+        let session_count = self.terminals.len();
+        let identity_source = if self.authorization.is_some() {
+            "signed_enrollment"
+        } else if self.owner_identity.is_some() {
+            "development_environment"
+        } else {
+            "development_unavailable"
+        };
         let boot = self
             .authorization
             .as_ref()
             .map(|a| format!(" boot_nonce={}", a.boot_nonce()))
             .unwrap_or_default();
-        format!("state=ready attestation={attestation} confidential=false sessions={session_count}{boot}")
+        format!("state=ready attestation={attestation} confidential=false identity_source={identity_source} sessions={session_count}{boot}")
     }
 }
 
@@ -189,17 +170,8 @@ impl RuntimeContext {
                 match &request.operation {
                     Operation::Health => Ok("OK".into()),
                     Operation::Status => Ok(self.status_line()),
-                    Operation::Start { profile } => {
-                        let profile = match profile.as_str() {
-                            "smoke" => Some(gammacloud_protocol::Profile::Smoke),
-                            "sleep" => Some(gammacloud_protocol::Profile::Sleep),
-                            "worker" => Some(gammacloud_protocol::Profile::Worker),
-                            _ => None,
-                        };
-                        profile.ok_or("profile_denied").and_then(|profile| {
-                            self.manager.start(profile).map_err(|_| "operation_failed")
-                        })
-                    }
+                    // Legacy profiles remain available only on the development protocol.
+                    Operation::Start { .. } => Err("isolated_execution_required"),
                     Operation::SessionOpen {
                         manifest,
                         ttl_seconds,
@@ -216,9 +188,8 @@ impl RuntimeContext {
                             .agent_profile(name)
                             .cloned();
                         match profile {
-                        Some(profile) if !profile.version.is_empty() && crate::development_agent::DevelopmentAgentKind::from_name(name).is_ok() => {
-                            let mut manifest = manifest.clone(); manifest.template = profile.template;
-                            self.open_terminal(&manifest, *ttl_seconds, &envelope)
+                        Some(profile) if !profile.version.is_empty() && manifest.template == profile.template => {
+                            self.open_terminal(manifest, *ttl_seconds, &envelope)
                         }
                         _ => Err("agent_denied"),
                     }
@@ -311,8 +282,13 @@ impl RuntimeContext {
                                 })
                         }
                     }
-                    Operation::Evidence { challenge } => self.authorization.as_ref().unwrap().evidence(challenge),
-                    Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::observability::gpu()})).map_err(|_| "metrics_unavailable"),
+                    Operation::Evidence { challenge, workload_digest } => {
+                        // Collecting a replacement proof invalidates the prior decision.
+                        self.terminals.close_all(&mut self.manager);
+                        self.manager.shutdown();
+                        self.authorization.as_mut().unwrap().evidence(challenge, workload_digest)
+                    },
+                    Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::telemetry::gpu()})).map_err(|_| "metrics_unavailable"),
                     Operation::RequestOutcome { id } => self.authorization.as_ref().unwrap().outcome(id),
                     Operation::ModelStart { manifest } => (|| {
                         let authorization = self.authorization.as_ref().unwrap();
@@ -466,11 +442,11 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
                 .as_ref()
                 .filter(|authorization| authorization.export_telemetry())
             {
-                let _ = crate::observability::export(
+                let _ = crate::telemetry::export(
                     &runtime.manager.samples(),
                     runtime.terminals.len(),
                     &authorization.volume_usage(),
-                    crate::observability::gpu().as_deref(),
+                    crate::telemetry::gpu().as_deref(),
                 );
             }
         }
@@ -481,6 +457,11 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
         {
             runtime.terminals.close_all(&mut runtime.manager);
             runtime.manager.shutdown();
+            runtime
+                .authorization
+                .as_ref()
+                .unwrap()
+                .reconcile_volumes()?;
         }
         if let Err(error) = lifecycle::wait(
             listener.as_raw_fd(),
@@ -514,7 +495,11 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
             Err(_) => eprintln!("gammacloud-runtime event=connection-failed"),
         }
     }
+    runtime.terminals.close_all(&mut runtime.manager);
     runtime.manager.shutdown();
+    if let Some(authorization) = &runtime.authorization {
+        authorization.reconcile_volumes()?;
+    }
     println!("gammacloud-runtime state={}", GuestState::Stopped.as_str());
     Ok(())
 }
@@ -567,10 +552,7 @@ fn handle_connection(
     let response = match envelope.request {
         Request::Health => Ok("OK\n".into()),
         Request::Status => Ok(format!("{}\n", runtime.status_line())),
-        Request::Shutdown => {
-            let _ = runtime.attestation.reject();
-            Ok("state=stopping\n".into())
-        }
+        Request::Shutdown => Ok("state=stopping\n".into()),
         Request::Start { profile } => runtime.manager.start(profile),
         Request::WorkloadStatus { id } => runtime.manager.status(id),
         Request::WorkloadLogs { id } => runtime.manager.logs(id),

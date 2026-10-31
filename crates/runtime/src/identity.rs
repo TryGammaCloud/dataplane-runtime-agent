@@ -1,3 +1,4 @@
+//! Development metadata only. Production enrollment is signed and persisted in authorization.rs.
 use std::env;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +64,7 @@ impl OwnerIdentity {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn verify_new_owner(&self, proposed: &OwnerIdentity) -> Result<(), String> {
         if proposed.organization_id != self.organization_id {
             return Err("organization_id mismatch".into());
@@ -77,11 +79,6 @@ impl OwnerIdentity {
             return Err("owner_public_key is already bound to a different identity".into());
         }
         Ok(())
-    }
-
-    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = session_id.into();
-        self
     }
 }
 

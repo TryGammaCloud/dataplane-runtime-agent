@@ -30,7 +30,7 @@ pub struct Manager {
     log_dir: PathBuf,
     policy: Policy,
     product: product::Product,
-    registry: Option<crate::recovery::Registry>,
+    registry: Option<crate::resilience::Reconciler>,
 }
 impl Manager {
     pub fn new(log_dir: PathBuf, policy: Policy, product: product::Product) -> Self {
@@ -44,14 +44,14 @@ impl Manager {
         }
     }
     pub fn enable_recovery(&mut self) -> std::io::Result<()> {
-        self.registry = Some(crate::recovery::Registry::open()?);
+        self.registry = Some(crate::resilience::Reconciler::open()?);
         Ok(())
     }
-    pub fn samples(&self) -> Vec<crate::observability::Sample> {
+    pub fn samples(&self) -> Vec<crate::telemetry::Sample> {
         self.jobs
             .iter()
             .map(|(id, job)| {
-                crate::observability::sample(
+                crate::telemetry::sample(
                     *id,
                     job.started_at
                         .elapsed()

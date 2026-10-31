@@ -1,6 +1,5 @@
 //! Mandatory per-workload CONNECT gateway outside the private network namespace.
 //! TLS remains end-to-end; gateway logs never contain requests or credentials.
-use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -14,20 +13,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Destination {
-    pub host: String,
-    pub port: u16,
-    pub addresses: Vec<IpAddr>,
-}
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EgressPolicy {
-    pub destinations: Vec<Destination>,
-    #[serde(default)]
-    pub allow_private_addresses: bool,
-}
+#[cfg(test)]
+use crate::network_policy::Destination;
+use crate::network_policy::NetworkPolicy as EgressPolicy;
 
 fn rejected() -> io::Error {
     io::Error::other("egress denied")

@@ -60,6 +60,7 @@ impl Models {
         if !root.starts_with("/srv/gammacloud/models") || fs::canonicalize(root)? != root {
             return Err(rejected());
         }
+        crate::workspace::trusted_path(root)?;
         let request: gammacloud_protocol::structured::AuthorizedRequest =
             serde_json::from_str(&authorization.request.payload).map_err(|_| rejected())?;
         for artifact in &manifest.artifacts {
@@ -75,6 +76,7 @@ impl Models {
             if fs::canonicalize(&path)? != path {
                 return Err(rejected());
             }
+            crate::workspace::trusted_path(&path)?;
             let metadata = path.metadata()?;
             if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
                 return Err(rejected());
