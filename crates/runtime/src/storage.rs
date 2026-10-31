@@ -80,6 +80,7 @@ fn key_descriptor(
     request: &SignedEnvelope,
     decision: &SignedEnvelope,
     key_version: &str,
+    purpose: &str,
 ) -> io::Result<OwnedFd> {
     let mut stream = UnixStream::connect("/run/gammacloud/key-release.sock")?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -99,7 +100,7 @@ fn key_descriptor(
     {
         return Err(denied());
     }
-    let bytes = serde_json::to_vec(&serde_json::json!({"version": 1, "volume_id": id, "key_version": key_version, "request": request, "decision": decision})).map_err(|_| denied())?;
+    let bytes = serde_json::to_vec(&serde_json::json!({"version": 1, "purpose":purpose, "volume_id": id, "key_version": key_version, "request": request, "decision": decision})).map_err(|_| denied())?;
     stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
     stream.write_all(&bytes)?;
     let mut status = [0; 1];
@@ -213,7 +214,7 @@ pub fn unlock(
     {
         return Err(denied());
     }
-    let key = key_descriptor(id, request, decision, "current")?;
+    let key = key_descriptor(id, request, decision, "current", "volume")?;
     let fd = key.as_raw_fd();
     let mapping = format!("gc-{id}");
     let mapper = format!("/dev/mapper/{mapping}");
@@ -507,8 +508,8 @@ pub fn rotate(
     if uuid(&policy.device)? != policy.luks_uuid {
         return Err(denied());
     }
-    let current = key_descriptor(id, request, decision, "current")?;
-    let next = key_descriptor(id, request, decision, "next")?;
+    let current = key_descriptor(id, request, decision, "current", "volume")?;
+    let next = key_descriptor(id, request, decision, "next", "volume")?;
     let old_fd = current.as_raw_fd();
     let new_fd = next.as_raw_fd();
     let mut command = Command::new(CRYPTSETUP);
@@ -535,6 +536,20 @@ pub fn rotate(
         });
     }
     crate::subprocess::output(&mut command, Duration::from_secs(30), 1024).map(|_| ())
+}
+
+pub fn credential_descriptor(
+    reference: &str,
+    scope: &str,
+    authorization: &crate::isolated::LaunchAuthorization<'_>,
+) -> io::Result<OwnedFd> {
+    key_descriptor(
+        reference,
+        authorization.request,
+        authorization.decision,
+        scope,
+        "credential",
+    )
 }
 
 #[cfg(test)]
