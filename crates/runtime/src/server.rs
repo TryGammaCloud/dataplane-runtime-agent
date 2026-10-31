@@ -105,37 +105,134 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
         GuestState::Ready.as_str()
     );
     for incoming in listener.incoming() {
-        let mut stream = incoming?;
-        if !runtime.authorized(&stream)? {
-            stream.write_all(b"ERR unauthorized-peer\n")?;
-            continue;
-        }
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        let mut request = String::new();
-        BufReader::new(&stream).take(257).read_line(&mut request)?;
-
-        let envelope = RequestEnvelope::parse(&request);
-        let response = match &envelope {
-            Ok(envelope) => match envelope.request {
-                Request::Health => "OK\n".into(),
-                Request::Status => format!("{}\n", runtime.status_line()),
-                Request::Shutdown => {
-                    let _ = runtime.attestation.reject();
-                    "state=stopping\n".into()
-                }
-                Request::Start { profile } => runtime.manager.start(profile)?,
-                Request::WorkloadStatus { id } => runtime.manager.status(id)?,
-                Request::WorkloadLogs { id } => runtime.manager.logs(id)?,
-                Request::Stop { id } => runtime.manager.stop(id)?,
-            },
-            Err(err) => format!("ERR {err}\n"),
+        let mut stream = match incoming {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         };
-        stream.write_all(response.as_bytes())?;
-        if matches!(&envelope, Ok(envelope) if matches!(envelope.request, Request::Shutdown)) {
-            break;
+        match handle_connection(&mut runtime, &mut stream) {
+            Ok(true) => break,
+            Ok(false) => {}
+            // Never log request contents or OS error details that may contain paths.
+            Err(_) => eprintln!("gammacloud-runtime event=connection-failed"),
         }
     }
     runtime.manager.shutdown();
     println!("gammacloud-runtime state={}", GuestState::Stopped.as_str());
     Ok(())
+}
+
+/// Handles one development connection; only an authorized SHUTDOWN stops service.
+fn handle_connection(
+    runtime: &mut RuntimeContext,
+    stream: &mut std::os::unix::net::UnixStream,
+) -> std::io::Result<bool> {
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    if !runtime.authorized(stream)? {
+        stream.write_all(b"ERR unauthorized-peer\n")?;
+        return Ok(false);
+    }
+    let mut request = String::new();
+    // At most 256 wire-content bytes plus CRLF; reject truncated frames.
+    BufReader::new(&*stream).take(258).read_line(&mut request)?;
+    if !request.ends_with('\n') || request.trim_end_matches(['\r', '\n']).len() > 256 {
+        stream.write_all(b"ERR invalid-request\n")?;
+        return Ok(false);
+    }
+    let envelope = match RequestEnvelope::parse(&request) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            stream.write_all(format!("ERR {error}\n").as_bytes())?;
+            return Ok(false);
+        }
+    };
+    let shutdown = matches!(envelope.request, Request::Shutdown);
+    let response = match envelope.request {
+        Request::Health => Ok("OK\n".into()),
+        Request::Status => Ok(format!("{}\n", runtime.status_line())),
+        Request::Shutdown => {
+            let _ = runtime.attestation.reject();
+            Ok("state=stopping\n".into())
+        }
+        Request::Start { profile } => runtime.manager.start(profile),
+        Request::WorkloadStatus { id } => runtime.manager.status(id),
+        Request::WorkloadLogs { id } => runtime.manager.logs(id),
+        Request::Stop { id } => runtime.manager.stop(id),
+    }
+    .unwrap_or_else(|_| "ERR operation-failed\n".into());
+    let result = stream.write_all(response.as_bytes());
+    // A disconnected caller must not cancel an already authorized shutdown.
+    if shutdown {
+        return Ok(true);
+    }
+    result?;
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    fn runtime() -> RuntimeContext {
+        RuntimeContext::new(
+            PathBuf::from("/dev/null/workloads"),
+            product::Product::Sandbox,
+        )
+        .unwrap()
+    }
+
+    fn exchange(runtime: &mut RuntimeContext, request: &[u8]) -> (bool, String) {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let shutdown = handle_connection(runtime, &mut server).unwrap();
+        drop(server);
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        (shutdown, response)
+    }
+
+    #[test]
+    fn incomplete_and_oversized_frames_do_not_execute() {
+        let mut runtime = runtime();
+        assert_eq!(
+            exchange(&mut runtime, b"SHUTDOWN").1,
+            "ERR invalid-request\n"
+        );
+        let mut oversized = vec![b' '; 257];
+        oversized.extend_from_slice(b"SHUTDOWN\n");
+        assert!(!exchange(&mut runtime, &oversized).0);
+        assert_eq!(exchange(&mut runtime, b"HEALTH\n"), (false, "OK\n".into()));
+    }
+
+    #[test]
+    fn operation_failure_keeps_runtime_available() {
+        let mut runtime = runtime();
+        assert_eq!(
+            exchange(&mut runtime, b"START smoke\n").1,
+            "ERR operation-failed\n"
+        );
+        assert_eq!(exchange(&mut runtime, b"V1 HEALTH\n").1, "OK\n");
+    }
+
+    #[test]
+    fn shutdown_survives_failed_acknowledgement() {
+        let mut runtime = runtime();
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(b"SHUTDOWN\n").unwrap();
+        client.shutdown(Shutdown::Both).unwrap();
+        assert!(handle_connection(&mut runtime, &mut server).unwrap());
+    }
+
+    #[test]
+    fn invalid_utf8_only_fails_its_connection() {
+        let mut runtime = runtime();
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(b"\xff\n").unwrap();
+        assert!(handle_connection(&mut runtime, &mut server).is_err());
+        assert_eq!(exchange(&mut runtime, b"HEALTH\r\n").1, "OK\n");
+    }
 }

@@ -155,9 +155,19 @@ impl Manager {
         for job in self.jobs.values_mut() {
             if job.exit_code.is_none() {
                 let _ = kill_process_group(job.child.id());
-                let _ = job.child.wait();
+                if let Ok(status) = job.child.wait() {
+                    job.exit_code = Some(status.code().unwrap_or(-1));
+                }
             }
         }
+    }
+}
+
+// LIFECYCLE: Also clean managed children on listener errors and unwinding.
+// SIGKILL/process abort and descendants that escape the group require OS isolation.
+impl Drop for Manager {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
