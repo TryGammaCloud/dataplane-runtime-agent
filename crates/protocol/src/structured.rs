@@ -185,6 +185,13 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn bounded(self) -> Self {
+        match serde_json::to_vec(&self) {
+            Ok(bytes) if bytes.len() < MAX_FRAME_BYTES => self,
+            _ => Self::error(&self.request_id, "response_too_large"),
+        }
+    }
+
     pub fn error(id: &str, code: &str) -> Self {
         Self {
             version: VERSION,

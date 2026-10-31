@@ -403,7 +403,7 @@ impl Authorization {
         }
         let path = self.state.join("requests").join(&request.request_id);
         let digest = hex(&Sha256::digest(envelope.payload.as_bytes()));
-        match trusted_read(&path, 65_536) {
+        match trusted_read(&path, 131_072) {
             Ok(data) => {
                 let record: Reservation =
                     serde_json::from_slice(&data).map_err(|_| "state_unavailable")?;
@@ -475,7 +475,7 @@ impl Authorization {
             return Err("invalid_request_id");
         }
         let record: Reservation = serde_json::from_slice(
-            &trusted_read(&self.state.join("requests").join(id), 65_536)
+            &trusted_read(&self.state.join("requests").join(id), 131_072)
                 .map_err(|_| "outcome_unavailable")?,
         )
         .map_err(|_| "outcome_unavailable")?;
@@ -494,7 +494,7 @@ impl Authorization {
     ) -> Result<(), &'static str> {
         let path = self.state.join("requests").join(&request.request_id);
         let mut record: Reservation =
-            serde_json::from_slice(&trusted_read(&path, 65_536).map_err(|_| "state_unavailable")?)
+            serde_json::from_slice(&trusted_read(&path, 131_072).map_err(|_| "state_unavailable")?)
                 .map_err(|_| "state_unavailable")?;
         record.response = Some(
             if matches!(
@@ -502,6 +502,7 @@ impl Authorization {
                 Operation::WorkloadLogs { .. }
                     | Operation::Files { .. }
                     | Operation::SessionRead { .. }
+                    | Operation::RequestOutcome { .. }
             ) {
                 Response::error(&request.request_id, "result_not_retained")
             } else {

@@ -21,6 +21,14 @@ pub fn install() -> io::Result<()> {
         statement(0x06, 0x80000000),
         statement(0x20, 0),
     ];
+    // x32 uses the x86_64 audit architecture with a different syscall-number bit.
+    filter.push(libc::sock_filter {
+        code: 0x45,
+        jt: 0,
+        jf: 1,
+        k: 0x40000000,
+    });
+    filter.push(statement(0x06, 0x80000000));
     for number in [
         libc::SYS_mount,
         libc::SYS_umount2,

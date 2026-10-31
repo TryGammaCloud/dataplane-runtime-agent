@@ -84,3 +84,20 @@ reservations/results, ID conflicts, verifier signature checking and owner revoca
 Tests were compiled by Clippy, not executed. Formatting and Clippy passed locally.
 Hardware acquisition, independent verifier integration, attested channel encryption,
 external anti-rollback, and cgroups isolation remain separate acceptance gates.
+
+## Subsequent implementation increments
+
+Later PRs add execute, volume/files, session/agent, model, metrics/outcome and raw
+evidence operations to the same signed envelope. See their dedicated contracts and
+IMPLEMENTATION_STATUS.md. Independent decisions additionally bind `workload_digest`
+(the exact normalized manifest serialization, documented in INFERENCE_CONTRACT.md).
+Leases use monotonic deadlines as well as Unix expiry; observed wall-clock rollback
+denies authorization. Persisted owner bindings also carry a resource digest, so
+state cannot silently migrate to another organization/project/sandbox/guest.
+The evolving experimental state schema intentionally rejects incompatible old state;
+no production migration or disk anti-rollback guarantee is supplied.
+
+Responses are bounded after JSON serialization, including escaping. File/log/terminal
+and outcome-query payloads are not retained as journal results. The example lists
+available permissions but has no execution templates, volumes or installed tools;
+placeholder trust keys must not be used as a real configuration.
