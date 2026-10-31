@@ -49,6 +49,7 @@ mod server;
     reason = "Interactive session transitions await PTY and protocol integration."
 )]
 mod session;
+mod snp;
 mod storage;
 mod subprocess;
 #[allow(
@@ -70,6 +71,13 @@ fn main() -> std::io::Result<()> {
             return Err(std::io::Error::other("invalid guard invocation"));
         }
         return exec_guard::run(&arguments[2]);
+    }
+    if arguments.get(1).map(String::as_str) == Some("--snp-evidence") {
+        if arguments.len() != 3 {
+            return Err(std::io::Error::other("invalid evidence invocation"));
+        }
+        println!("{}", snp::collect(&arguments[2])?);
+        return Ok(());
     }
     if arguments.get(1).map(String::as_str) == Some("--health-probe") {
         if arguments.len() != 5 {

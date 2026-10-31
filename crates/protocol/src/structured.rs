@@ -92,6 +92,9 @@ pub enum Operation {
         manifest: ExecutionManifest,
         ttl_seconds: u64,
     },
+    Evidence {
+        challenge: String,
+    },
     Metrics,
     RequestOutcome {
         id: String,
@@ -133,6 +136,7 @@ impl Operation {
             Self::Execute { .. } => "execute",
             Self::ModelStart { .. } => "model_start",
             Self::Metrics => "metrics",
+            Self::Evidence { .. } => "evidence",
             Self::RequestOutcome { .. } => "request_outcome",
             Self::ModelStatus { .. } => "model_status",
             Self::ModelStop { .. } => "model_stop",

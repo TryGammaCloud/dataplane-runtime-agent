@@ -434,6 +434,37 @@ impl Authorization {
         Ok(Admission::Execute(Box::new(request)))
     }
 
+    pub fn evidence(&self, challenge: &str) -> Result<String, &'static str> {
+        decode::<32>(challenge)?;
+        let owner = self
+            .owner
+            .as_ref()
+            .filter(|owner| !owner.revoked)
+            .ok_or("owner_unavailable")?;
+        let context = serde_json::to_string(&serde_json::json!({
+            "challenge":challenge, "organization_id":self.policy.organization_id, "project_id":self.policy.project_id,
+            "sandbox_id":self.policy.sandbox_id, "guest_id":self.policy.guest_id, "boot_nonce":self.boot_nonce,
+            "owner_public_key":owner.public_key, "owner_epoch":owner.epoch, "image_digest":self.policy.image_digest,
+            "workload_identity":owner.workload_identity, "policy_version":self.policy.policy_version,
+        })).map_err(|_| "evidence_unavailable")?;
+        let output = crate::subprocess::output(
+            std::process::Command::new(
+                std::env::current_exe().map_err(|_| "evidence_unavailable")?,
+            )
+            .env_clear()
+            .arg("--snp-evidence")
+            .arg(&context)
+            .stdin(std::process::Stdio::null()),
+            std::time::Duration::from_secs(2),
+            16_384,
+        )
+        .map_err(|_| "evidence_unavailable")?;
+        let response: serde_json::Value =
+            serde_json::from_slice(&output).map_err(|_| "evidence_unavailable")?;
+        serde_json::to_string(&serde_json::json!({"context":context,"evidence":response}))
+            .map_err(|_| "evidence_unavailable")
+    }
+
     pub fn outcome(&self, id: &str) -> Result<String, &'static str> {
         if id.is_empty()
             || id.len() > 64

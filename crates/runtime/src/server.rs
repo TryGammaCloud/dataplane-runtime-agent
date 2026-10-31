@@ -315,6 +315,7 @@ impl RuntimeContext {
                                 })
                         }
                     }
+                    Operation::Evidence { challenge } => self.authorization.as_ref().unwrap().evidence(challenge),
                     Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::observability::gpu()})).map_err(|_| "metrics_unavailable"),
                     Operation::RequestOutcome { id } => self.authorization.as_ref().unwrap().outcome(id),
                     Operation::ModelStart { manifest } => (|| {
