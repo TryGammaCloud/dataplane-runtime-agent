@@ -1,3 +1,7 @@
 /target
 *.swp
 .env
+*.log
+*.raw
+*.qcow2
+*.img

@@ -2,6 +2,14 @@
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCapabilities {
+    pub workload_execution: bool,
+    pub session_management: bool,
+    pub persistent_volumes: bool,
+    pub attestation_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Product {
     Legacy,
     Sandbox,
@@ -18,8 +26,31 @@ impl Product {
         }
     }
 
+    pub fn capabilities(self) -> RuntimeCapabilities {
+        match self {
+            Self::Legacy => RuntimeCapabilities {
+                workload_execution: true,
+                session_management: false,
+                persistent_volumes: false,
+                attestation_required: false,
+            },
+            Self::Sandbox => RuntimeCapabilities {
+                workload_execution: true,
+                session_management: true,
+                persistent_volumes: true,
+                attestation_required: false,
+            },
+            Self::Models => RuntimeCapabilities {
+                workload_execution: false,
+                session_management: true,
+                persistent_volumes: true,
+                attestation_required: true,
+            },
+        }
+    }
+
     pub fn allows_workload(self) -> bool {
-        matches!(self, Self::Legacy | Self::Sandbox)
+        self.capabilities().workload_execution
     }
 }
 
@@ -51,5 +82,7 @@ mod tests {
         assert!(Product::parse("models extra").is_err());
         assert!(Product::Sandbox.allows_workload());
         assert!(!Product::Models.allows_workload());
+        assert!(Product::Sandbox.capabilities().session_management);
+        assert!(Product::Models.capabilities().attestation_required);
     }
 }

@@ -44,6 +44,16 @@ The runtime defaults to the effective UID of the runtime process. Override with 
 - Host agent provisions VMs, networks and disks; it must not impersonate the guest runtime.
 - A development VM must never claim production confidentiality.
 
+## Runtime modular architecture direction
+
+The runtime is already structured around a common guest-local server, a product profile, and a work manager. The next evolution is to make those responsibilities explicit:
+
+- Common Runtime: lifecycle, policy, coordination, communication, logging, observability.
+- Sandbox Workload Runtime: limited execution, sessions, workspace, user-owned files, local tools.
+- Inference Workload Runtime: model manifest validation, inference-server supervision, resource reporting, health checks.
+
+The current code keeps the legacy development model effectively while introducing explicit product capability gates through `Product::capabilities()`. This reduces the risk of silently treating `Legacy`, `Sandbox`, and `Models` as equivalent execution profiles.
+
 ## Next steps
 
 1. Attestation-bound authenticated host-to-guest transport (vsock) and signed workload authorization. Local UID policy is not sufficient.
