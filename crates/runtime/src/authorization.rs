@@ -29,6 +29,8 @@ pub struct TrustPolicy {
     pub verifier_public_key: String,
     pub permissions: BTreeSet<String>,
     pub require_attestation_for_start: bool,
+    #[serde(default)]
+    pub execution_templates: crate::isolated::Templates,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,7 +50,7 @@ struct Reservation {
 }
 
 pub enum Admission {
-    Execute(AuthorizedRequest),
+    Execute(Box<AuthorizedRequest>),
     Cached(Response),
 }
 
@@ -247,6 +249,10 @@ impl Authorization {
         })
     }
 
+    pub fn execution_template(&self, name: &str) -> Option<&crate::isolated::ExecutionTemplate> {
+        self.policy.execution_templates.get(name)
+    }
+
     pub fn boot_nonce(&self) -> &str {
         &self.boot_nonce
     }
@@ -313,8 +319,10 @@ impl Authorization {
         {
             return Err("operation_denied");
         }
-        if matches!(request.operation, Operation::Start { .. })
-            && self.policy.require_attestation_for_start
+        if matches!(
+            request.operation,
+            Operation::Start { .. } | Operation::Execute { .. }
+        ) && self.policy.require_attestation_for_start
             && !self.attested()
         {
             return Err("attestation_required");
@@ -349,7 +357,7 @@ impl Authorization {
         .map_err(|_| "state_unavailable")?;
         // Reserve before effects; a crash can produce uncertainty, never automatic replay.
         atomic_write(&path, &record).map_err(|_| "state_unavailable")?;
-        Ok(Admission::Execute(request))
+        Ok(Admission::Execute(Box::new(request)))
     }
 
     pub fn finish(
@@ -514,6 +522,7 @@ mod tests {
                     .map(String::from)
                     .collect(),
                 require_attestation_for_start: true,
+                execution_templates: Default::default(),
             };
             Self {
                 authorization: Authorization::open(policy, state).unwrap(),
