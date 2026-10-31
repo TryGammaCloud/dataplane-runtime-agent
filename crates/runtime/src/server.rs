@@ -25,6 +25,7 @@ struct RuntimeContext {
     authorization: Option<Authorization>,
     terminals: crate::terminal::Terminals,
     models: crate::inference::Models,
+    last_export: std::time::Instant,
     manager: Manager,
     session_manager: SessionManager,
     #[allow(
@@ -51,11 +52,16 @@ impl RuntimeContext {
             let _ = session_manager.create("runtime-session", identity, Duration::from_secs(3600));
         }
         let network_policy = NetworkPolicy::from_env().unwrap_or_else(|_| NetworkPolicy::new());
+        let mut manager = Manager::new(log_dir, Policy::from_env()?, product);
+        if authorization.is_some() {
+            manager.enable_recovery()?;
+        }
         Ok(Self {
             authorization,
             terminals: Default::default(),
             models: Default::default(),
-            manager: Manager::new(log_dir, Policy::from_env()?, product),
+            manager,
+            last_export: std::time::Instant::now(),
             session_manager,
             owner_identity,
             attestation: AttestationCoordinator::new(),
@@ -309,6 +315,8 @@ impl RuntimeContext {
                                 })
                         }
                     }
+                    Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::observability::gpu()})).map_err(|_| "metrics_unavailable"),
+                    Operation::RequestOutcome { id } => self.authorization.as_ref().unwrap().outcome(id),
                     Operation::ModelStart { manifest } => (|| {
                         let authorization = self.authorization.as_ref().unwrap();
                         let template = authorization
@@ -441,6 +449,21 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     );
     while !lifecycle::stopping() {
         runtime.terminals.expire(&mut runtime.manager);
+        if runtime.last_export.elapsed() >= Duration::from_secs(10) {
+            runtime.last_export = std::time::Instant::now();
+            if let Some(authorization) = runtime
+                .authorization
+                .as_ref()
+                .filter(|authorization| authorization.export_telemetry())
+            {
+                let _ = crate::observability::export(
+                    &runtime.manager.samples(),
+                    runtime.terminals.len(),
+                    &authorization.volume_usage(),
+                    crate::observability::gpu().as_deref(),
+                );
+            }
+        }
         if runtime
             .authorization
             .as_mut()

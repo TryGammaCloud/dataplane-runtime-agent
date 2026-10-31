@@ -42,6 +42,10 @@ fn rejected() -> io::Error {
 }
 
 impl Terminals {
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
     pub fn open(
         &mut self,
         manager: &mut Manager,

@@ -20,6 +20,7 @@ mod exec_guard;
 mod identity;
 mod inference;
 mod isolated;
+mod lease;
 mod lifecycle;
 mod manager;
 #[allow(
@@ -32,12 +33,15 @@ mod model_runtime;
     reason = "Policy interfaces are declarative until egress enforcement is integrated."
 )]
 mod network_policy;
+mod observability;
 mod product;
+mod recovery;
 #[allow(
     dead_code,
     reason = "Reconciliation interfaces await persistent state and process discovery."
 )]
 mod resilience;
+mod seccomp;
 mod security;
 mod server;
 #[allow(

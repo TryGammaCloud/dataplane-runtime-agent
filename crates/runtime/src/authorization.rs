@@ -30,6 +30,8 @@ pub struct TrustPolicy {
     pub permissions: BTreeSet<String>,
     pub require_attestation_for_start: bool,
     #[serde(default)]
+    pub export_telemetry: bool,
+    #[serde(default)]
     pub execution_templates: crate::isolated::Templates,
     #[serde(default)]
     pub development_agents: std::collections::BTreeMap<String, crate::terminal::AgentProfile>,
@@ -44,6 +46,7 @@ struct OwnerBinding {
     workload_identity: String,
     epoch: u64,
     revoked: bool,
+    resource_digest: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +67,8 @@ pub struct Authorization {
     boot_nonce: String,
     state: PathBuf,
     verified_until: u64,
+    verified_deadline: Option<std::time::Instant>,
+    last_wall_time: u64,
     decision: Option<SignedEnvelope>,
     journal_lock: File,
 }
@@ -108,7 +113,7 @@ pub fn verify(key: &str, domain: &[u8], envelope: &SignedEnvelope) -> Result<(),
         .map_err(|_| "invalid_signature")
 }
 
-fn trusted_read(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
+pub(crate) fn trusted_read(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -129,7 +134,7 @@ fn trusted_read(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
-fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension("pending");
     let mut file = OpenOptions::new()
         .write(true)
@@ -226,11 +231,18 @@ impl Authorization {
         {
             return Err(error());
         }
-        let owner = match trusted_read(&state.join("owner.json"), 16_384) {
+        let owner: Option<OwnerBinding> = match trusted_read(&state.join("owner.json"), 16_384) {
             Ok(data) => Some(serde_json::from_slice(&data).map_err(|_| error())?),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
+        let resource_digest = Self::resource_digest(&policy)?;
+        if owner
+            .as_ref()
+            .is_some_and(|owner| owner.resource_digest != resource_digest)
+        {
+            return Err(error());
+        }
         let journal = state.join("requests");
         if !journal.exists() {
             fs::DirBuilder::new().mode(0o700).create(&journal)?;
@@ -250,9 +262,39 @@ impl Authorization {
             boot_nonce: hex(&nonce),
             state,
             verified_until: 0,
+            verified_deadline: None,
+            last_wall_time: now().map_err(|_| error())?,
             decision: None,
             journal_lock,
         })
+    }
+
+    fn resource_digest(policy: &TrustPolicy) -> io::Result<String> {
+        Ok(hex(&Sha256::digest(
+            serde_json::to_vec(&(
+                &policy.organization_id,
+                &policy.project_id,
+                &policy.sandbox_id,
+                &policy.guest_id,
+                &policy.enrollment_public_key,
+            ))
+            .map_err(|_| error())?,
+        )))
+    }
+
+    pub fn export_telemetry(&self) -> bool {
+        self.policy.export_telemetry
+    }
+    pub fn volume_usage(&self) -> Vec<u64> {
+        self.policy
+            .volumes
+            .iter()
+            .filter_map(|(id, volume)| {
+                crate::storage::ready(id, volume)
+                    .ok()
+                    .and_then(|_| crate::observability::disk_bytes(&volume.mount_path).ok())
+            })
+            .collect()
     }
 
     pub fn agent_profile(&self, name: &str) -> Option<&crate::terminal::AgentProfile> {
@@ -283,7 +325,9 @@ impl Authorization {
         &self.boot_nonce
     }
     pub fn attested(&self) -> bool {
-        now().is_ok_and(|time| time < self.verified_until)
+        self.verified_deadline
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
+            && now().is_ok_and(|time| time >= self.last_wall_time && time < self.verified_until)
     }
 
     pub fn admit(&mut self, envelope: &SignedEnvelope) -> Result<Admission, &'static str> {
@@ -305,6 +349,10 @@ impl Authorization {
             return Err("invalid_request_id");
         }
         let time = now()?;
+        if time < self.last_wall_time {
+            return Err("clock_rollback");
+        }
+        self.last_wall_time = time;
         if request.issued_at > time
             || request.expires_at <= time
             || request.expires_at.saturating_sub(request.issued_at) > 300
@@ -386,6 +434,28 @@ impl Authorization {
         Ok(Admission::Execute(Box::new(request)))
     }
 
+    pub fn outcome(&self, id: &str) -> Result<String, &'static str> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err("invalid_request_id");
+        }
+        let record: Reservation = serde_json::from_slice(
+            &trusted_read(&self.state.join("requests").join(id), 65_536)
+                .map_err(|_| "outcome_unavailable")?,
+        )
+        .map_err(|_| "outcome_unavailable")?;
+        serde_json::to_string(
+            &record
+                .response
+                .unwrap_or_else(|| Response::error(id, "outcome_unknown")),
+        )
+        .map_err(|_| "outcome_unavailable")
+    }
+
     pub fn finish(
         &self,
         request: &AuthorizedRequest,
@@ -422,6 +492,7 @@ impl Authorization {
         .map_err(|_| "state_unavailable")?;
         self.owner = Some(owner);
         self.verified_until = 0;
+        self.verified_deadline = None;
         self.decision = None;
         Ok(())
     }
@@ -448,6 +519,8 @@ impl Authorization {
                     workload_identity: workload_identity.clone(),
                     epoch: 1,
                     revoked: false,
+                    resource_digest: Self::resource_digest(&self.policy)
+                        .map_err(|_| "state_unavailable")?,
                 })?;
             }
             Operation::Rotate {
@@ -509,6 +582,10 @@ impl Authorization {
                     return Err("decision_binding_mismatch");
                 }
                 self.verified_until = decision.expires_at;
+                self.verified_deadline = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(decision.expires_at - time),
+                );
                 if let Operation::Attest { decision } = &request.operation {
                     self.decision = Some(decision.clone());
                 }
@@ -563,6 +640,7 @@ mod tests {
                     .map(String::from)
                     .collect(),
                 require_attestation_for_start: true,
+                export_telemetry: false,
                 execution_templates: Default::default(),
                 volumes: Default::default(),
                 development_agents: Default::default(),

@@ -92,6 +92,10 @@ pub enum Operation {
         manifest: ExecutionManifest,
         ttl_seconds: u64,
     },
+    Metrics,
+    RequestOutcome {
+        id: String,
+    },
     ModelStart {
         manifest: InferenceManifest,
     },
@@ -128,6 +132,8 @@ impl Operation {
             Self::Start { .. } => "start",
             Self::Execute { .. } => "execute",
             Self::ModelStart { .. } => "model_start",
+            Self::Metrics => "metrics",
+            Self::RequestOutcome { .. } => "request_outcome",
             Self::ModelStatus { .. } => "model_status",
             Self::ModelStop { .. } => "model_stop",
             Self::SessionOpen { .. } => "session_open",
