@@ -25,6 +25,7 @@ pub struct Guard {
     pub root_device: u64,
     pub root_inode: u64,
     pub egress_lifetime: Option<u64>,
+    pub deadline_boot_nanos: u64,
 }
 
 fn denied() -> io::Error {
@@ -117,6 +118,16 @@ pub fn run(raw: &str) -> io::Result<()> {
     if hex(&digest.finalize()) != guard.digest {
         return Err(denied());
     }
+    for path in ["/", "/nix/store", "/sys/fs/cgroup"] {
+        let path = std::ffi::CString::new(path).map_err(|_| denied())?;
+        let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(path.as_ptr(), &mut stats) } != 0
+            || stats.f_flag & libc::ST_RDONLY == 0
+        {
+            return Err(denied());
+        }
+    }
+    crate::seccomp::install()?;
     if let Some(lifetime) = guard.egress_lifetime {
         let mut child = Command::new(std::env::current_exe()?)
             .arg("--egress-sidecar")
@@ -142,6 +153,9 @@ pub fn run(raw: &str) -> io::Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+    if crate::lifecycle::boot_nanos()? >= guard.deadline_boot_nanos {
+        return Err(denied());
     }
     // Exec preserves the verified namespaces, cgroup, credentials and seccomp filter.
     Err(Command::new(&guard.executable)

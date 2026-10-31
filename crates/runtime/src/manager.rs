@@ -21,6 +21,8 @@ struct Workload {
     stdout: PathBuf,
     stderr: PathBuf,
     exit_code: Option<i32>,
+    started_at: std::time::Instant,
+    lease: Option<crate::lease::Lease>,
 }
 pub struct Manager {
     jobs: BTreeMap<u64, Workload>,
@@ -28,6 +30,7 @@ pub struct Manager {
     log_dir: PathBuf,
     policy: Policy,
     product: product::Product,
+    registry: Option<crate::recovery::Registry>,
 }
 impl Manager {
     pub fn new(log_dir: PathBuf, policy: Policy, product: product::Product) -> Self {
@@ -37,8 +40,29 @@ impl Manager {
             log_dir,
             policy,
             product,
+            registry: None,
         }
     }
+    pub fn enable_recovery(&mut self) -> std::io::Result<()> {
+        self.registry = Some(crate::recovery::Registry::open()?);
+        Ok(())
+    }
+    pub fn samples(&self) -> Vec<crate::observability::Sample> {
+        self.jobs
+            .iter()
+            .map(|(id, job)| {
+                crate::observability::sample(
+                    *id,
+                    job.started_at
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64,
+                    job.unit.as_deref(),
+                )
+            })
+            .collect()
+    }
+
     pub fn authorize(&self, stream: &std::os::unix::net::UnixStream) -> std::io::Result<bool> {
         self.policy.authorize(stream)
     }
@@ -97,6 +121,8 @@ impl Manager {
                 stdout,
                 stderr,
                 exit_code: None,
+                started_at: std::time::Instant::now(),
+                lease: None,
             },
         );
         Ok(format!("OK id={id} profile={}\n", profile.as_str()))
@@ -110,12 +136,16 @@ impl Manager {
         terminal: Option<File>,
         authorization: crate::isolated::LaunchAuthorization<'_>,
     ) -> std::io::Result<String> {
-        if !self.product.allows_workload() {
+        if !matches!(
+            self.product,
+            product::Product::Sandbox | product::Product::Models
+        ) {
             return Ok("ERR workload-not-allowed-for-product\n".into());
         }
         if self.jobs.len() >= MAX_WORKLOADS {
             return Ok("ERR capacity-exceeded\n".into());
         }
+        crate::isolated::validate(manifest, template)?;
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -130,12 +160,18 @@ impl Manager {
         let decision: gammacloud_protocol::structured::AttestationDecision =
             serde_json::from_str(&authorization.decision.payload)
                 .map_err(|_| std::io::Error::other("decision unavailable"))?;
+        if decision.workload_digest != authorization.workload_digest {
+            return Err(std::io::Error::other("workload decision mismatch"));
+        }
         let remaining = decision.expires_at.saturating_sub(
             crate::authorization::now().map_err(|_| std::io::Error::other("clock unavailable"))?,
         );
         if remaining == 0 {
             return Err(std::io::Error::other("decision expired"));
         }
+        let lease_deadline = std::time::Instant::now() + std::time::Duration::from_secs(remaining);
+        let mut deadline_boot_nanos =
+            crate::lifecycle::boot_nanos()?.saturating_add(remaining.saturating_mul(1_000_000_000));
         let mut effective = manifest.clone();
         effective.timeout_seconds = effective.timeout_seconds.min(remaining);
         let mut credential_descriptors = Vec::new();
@@ -153,6 +189,10 @@ impl Manager {
                 return Err(std::io::Error::other("credential policy invalid"));
             }
             effective.timeout_seconds = effective.timeout_seconds.min(policy.lifetime_seconds);
+            deadline_boot_nanos = deadline_boot_nanos.min(
+                crate::lifecycle::boot_nanos()?
+                    .saturating_add(policy.lifetime_seconds.saturating_mul(1_000_000_000)),
+            );
             let fd = crate::storage::credential_descriptor(
                 &policy.reference,
                 &policy.scope,
@@ -176,11 +216,14 @@ impl Manager {
         let mut command = crate::isolated::command(
             &effective,
             template,
-            &unit,
-            volume,
-            terminal.is_some(),
-            gateway.as_ref().map(|gateway| gateway.path.as_path()),
-            &credential_paths,
+            crate::isolated::LaunchOptions {
+                unit: &unit,
+                volume,
+                interactive: terminal.is_some(),
+                gateway: gateway.as_ref().map(|gateway| gateway.path.as_path()),
+                credentials: &credential_paths,
+                deadline_boot_nanos,
+            },
         )?;
         fs::create_dir_all(&self.log_dir)?;
         fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
@@ -214,7 +257,29 @@ impl Manager {
                 .stdout(Stdio::from(File::create(&stdout)?))
                 .stderr(Stdio::from(File::create(&stderr)?));
         }
+        if let Some(registry) = &self.registry {
+            registry.track(&unit, &authorization.workload_digest)?;
+        }
+        let parent = unsafe { libc::getpid() };
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                    || libc::getppid() != parent
+                {
+                    return Err(std::io::Error::other("runtime parent unavailable"));
+                }
+                Ok(())
+            });
+        }
+        let monotonic_remaining =
+            deadline_boot_nanos.saturating_sub(crate::lifecycle::boot_nanos()?);
+        if monotonic_remaining == 0 {
+            return Err(std::io::Error::other("launch lease expired"));
+        }
+        let deadline = lease_deadline
+            .min(std::time::Instant::now() + std::time::Duration::from_nanos(monotonic_remaining));
         let child = command.spawn()?;
+        let lease = Some(crate::lease::Lease::start(unit.clone(), deadline));
         self.jobs.insert(
             id,
             Workload {
@@ -226,9 +291,19 @@ impl Manager {
                 stdout,
                 stderr,
                 exit_code: None,
+                started_at: std::time::Instant::now(),
+                lease,
             },
         );
         Ok(format!("OK id={id} state=starting\n"))
+    }
+
+    pub fn product(&self) -> product::Product {
+        self.product
+    }
+
+    pub fn unit(&self, id: u64) -> Option<&str> {
+        self.jobs.get(&id).and_then(|job| job.unit.as_deref())
     }
 
     pub fn latest_id(&self) -> Option<u64> {
@@ -292,16 +367,25 @@ impl Manager {
             let status = job.child.wait()?;
             job.exit_code = Some(status.code().unwrap_or(-1));
         }
+        job.lease.take();
         job.gateway.take();
         job.credential_descriptors.clear();
+        if let (Some(registry), Some(unit)) = (&self.registry, &job.unit) {
+            registry.complete(unit)?;
+        }
         Ok(format!("OK id={id} state=exited\n"))
     }
     pub fn shutdown(&mut self) {
         for job in self.jobs.values_mut() {
+            job.lease.take();
             job.gateway.take();
             job.credential_descriptors.clear();
             if let Some(unit) = &job.unit {
-                let _ = crate::isolated::control(unit, "stop");
+                if crate::isolated::control(unit, "stop").is_ok() {
+                    if let Some(registry) = &self.registry {
+                        let _ = registry.complete(unit);
+                    }
+                }
             }
             if job.exit_code.is_none() {
                 let _ = kill_process_group(job.child.id());

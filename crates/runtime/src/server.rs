@@ -24,6 +24,8 @@ use std::time::Duration;
 struct RuntimeContext {
     authorization: Option<Authorization>,
     terminals: crate::terminal::Terminals,
+    models: crate::inference::Models,
+    last_export: std::time::Instant,
     manager: Manager,
     session_manager: SessionManager,
     #[allow(
@@ -50,10 +52,16 @@ impl RuntimeContext {
             let _ = session_manager.create("runtime-session", identity, Duration::from_secs(3600));
         }
         let network_policy = NetworkPolicy::from_env().unwrap_or_else(|_| NetworkPolicy::new());
+        let mut manager = Manager::new(log_dir, Policy::from_env()?, product);
+        if authorization.is_some() {
+            manager.enable_recovery()?;
+        }
         Ok(Self {
             authorization,
             terminals: Default::default(),
-            manager: Manager::new(log_dir, Policy::from_env()?, product),
+            models: Default::default(),
+            manager,
+            last_export: std::time::Instant::now(),
             session_manager,
             owner_identity,
             attestation: AttestationCoordinator::new(),
@@ -129,12 +137,14 @@ impl RuntimeContext {
                 template,
                 volume,
                 ttl,
-                crate::isolated::LaunchAuthorization {
+                crate::isolated::LaunchAuthorization::new(
                     request,
-                    decision: authorization
+                    authorization
                         .current_decision()
                         .ok_or("attestation_required")?,
-                },
+                    manifest,
+                )
+                .map_err(|_| "invalid_manifest")?,
             )
             .map_err(|_| "session_open_failed")
     }
@@ -143,7 +153,7 @@ impl RuntimeContext {
         let encode = |response: Response| {
             format!(
                 "{}\n",
-                serde_json::to_string(&response).expect("response serialization")
+                serde_json::to_string(&response.bounded()).expect("response serialization")
             )
         };
         let Some(authorization) = self.authorization.as_mut() else {
@@ -262,18 +272,14 @@ impl RuntimeContext {
                         }
                     }
                     Operation::VolumeLock { id } => {
-                        // Workloads must release their mounts before a non-lazy unmount.
-                        self.manager.shutdown();
-                        self.authorization
-                            .as_ref()
-                            .unwrap()
-                            .volume_policy(id)
-                            .ok_or("volume_denied")
-                            .and_then(|policy| {
-                                crate::storage::lock(id, policy)
-                                    .map(|_| "locked".into())
-                                    .map_err(|_| "volume_busy_or_lock_failed")
-                            })
+                        match self.authorization.as_ref().unwrap().volume_policy(id).cloned() {
+                            Some(policy) => {
+                                self.terminals.close_all(&mut self.manager);
+                                self.manager.shutdown();
+                                crate::storage::lock(id, &policy).map(|_| "locked".into()).map_err(|_| "volume_busy_or_lock_failed")
+                            }
+                            None => Err("volume_denied"),
+                        }
                     }
                     Operation::VolumeStatus { id } => self
                         .authorization
@@ -305,6 +311,34 @@ impl RuntimeContext {
                                 })
                         }
                     }
+                    Operation::Evidence { challenge } => self.authorization.as_ref().unwrap().evidence(challenge),
+                    Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::observability::gpu()})).map_err(|_| "metrics_unavailable"),
+                    Operation::RequestOutcome { id } => self.authorization.as_ref().unwrap().outcome(id),
+                    Operation::ModelStart { manifest } => (|| {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        let template = authorization
+                            .execution_template(&manifest.execution.template)
+                            .ok_or("template_denied")?;
+                        let context = crate::isolated::LaunchAuthorization::new(
+                            &envelope,
+                            authorization
+                                .current_decision()
+                                .ok_or("attestation_required")?,
+                            manifest,
+                        )
+                        .map_err(|_| "invalid_manifest")?;
+                        self.models
+                            .start(&mut self.manager, manifest, template, context)
+                            .map_err(|_| "model_start_failed")
+                    })(),
+                    Operation::ModelStatus { id } => self
+                        .models
+                        .status(&mut self.manager, id)
+                        .map_err(|_| "model_status_failed"),
+                    Operation::ModelStop { id } => self
+                        .models
+                        .stop(&mut self.manager, id)
+                        .map_err(|_| "model_stop_failed"),
                     Operation::Execute { manifest } => (|| {
                         let authorization = self.authorization.as_ref().unwrap();
                         let template = authorization
@@ -314,12 +348,14 @@ impl RuntimeContext {
                             .volume_id
                             .as_ref()
                             .and_then(|id| authorization.volume_policy(id));
-                        let context = crate::isolated::LaunchAuthorization {
-                            request: &envelope,
-                            decision: authorization
+                        let context = crate::isolated::LaunchAuthorization::new(
+                            &envelope,
+                            authorization
                                 .current_decision()
                                 .ok_or("attestation_required")?,
-                        };
+                            manifest,
+                        )
+                        .map_err(|_| "invalid_manifest")?;
                         self.manager
                             .execute(manifest, template, volume, None, context)
                             .map_err(|_| "isolation_or_execution_failed")
@@ -342,13 +378,26 @@ impl RuntimeContext {
             }
         };
         let response = match result {
-            Ok(result) if result.starts_with("ERR ") => Response::error(
-                &request.request_id,
-                result.trim().trim_start_matches("ERR "),
-            ),
+            Ok(result)
+                if result.starts_with("ERR ")
+                    && matches!(
+                        request.operation,
+                        Operation::Start { .. }
+                            | Operation::Execute { .. }
+                            | Operation::WorkloadStatus { .. }
+                            | Operation::WorkloadLogs { .. }
+                            | Operation::Stop { .. }
+                    ) =>
+            {
+                Response::error(
+                    &request.request_id,
+                    result.trim().trim_start_matches("ERR "),
+                )
+            }
             Ok(result) => Response::success(&request.request_id, result),
             Err(code) => Response::error(&request.request_id, code),
-        };
+        }
+        .bounded();
         let response = if self
             .authorization
             .as_ref()
@@ -410,6 +459,21 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     );
     while !lifecycle::stopping() {
         runtime.terminals.expire(&mut runtime.manager);
+        if runtime.last_export.elapsed() >= Duration::from_secs(10) {
+            runtime.last_export = std::time::Instant::now();
+            if let Some(authorization) = runtime
+                .authorization
+                .as_ref()
+                .filter(|authorization| authorization.export_telemetry())
+            {
+                let _ = crate::observability::export(
+                    &runtime.manager.samples(),
+                    runtime.terminals.len(),
+                    &authorization.volume_usage(),
+                    crate::observability::gpu().as_deref(),
+                );
+            }
+        }
         if runtime
             .authorization
             .as_mut()
