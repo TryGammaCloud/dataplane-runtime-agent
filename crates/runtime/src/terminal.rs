@@ -93,14 +93,17 @@ impl Terminals {
         if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        let mut nonce = [0; 16];
+        File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+        let id = hex(&nonce);
+        if self.sessions.contains_key(&id) {
+            return Err(rejected());
+        }
         let response = manager.execute(manifest, template, volume, Some(slave), authorization)?;
         if response.starts_with("ERR ") {
             return Err(rejected());
         }
         let job = manager.latest_id().ok_or_else(rejected)?;
-        let mut nonce = [0; 16];
-        File::open("/dev/urandom")?.read_exact(&mut nonce)?;
-        let id = hex(&nonce);
         self.sessions.insert(
             id.clone(),
             Terminal {
@@ -137,8 +140,9 @@ impl Terminals {
     }
 
     pub fn close(&mut self, manager: &mut Manager, id: &str) -> io::Result<String> {
-        if let Some(session) = self.sessions.remove(id) {
+        if let Some(session) = self.sessions.get(id) {
             manager.stop(session.job)?;
+            self.sessions.remove(id);
             eprintln!("gammacloud-runtime event=session-closed");
         }
         Ok("closed".into())
@@ -153,6 +157,9 @@ impl Terminals {
 
     pub fn read(&mut self, id: &str, cursor: u64) -> io::Result<String> {
         let session = self.sessions.get_mut(id).ok_or_else(rejected)?;
+        if Instant::now() >= session.expires || session.idle.elapsed() >= Duration::from_secs(120) {
+            return Err(rejected());
+        }
         if cursor < session.base || cursor > session.emitted {
             return Err(rejected());
         }
@@ -198,6 +205,9 @@ impl Terminals {
             .map(|i| u8::from_str_radix(&data[i..i + 2], 16).map_err(|_| rejected()))
             .collect::<io::Result<_>>()?;
         let session = self.sessions.get_mut(id).ok_or_else(rejected)?;
+        if Instant::now() >= session.expires || session.idle.elapsed() >= Duration::from_secs(120) {
+            return Err(rejected());
+        }
         let digest = hex(&Sha256::digest(&bytes));
         if let Some((previous, hash, accepted)) = &session.last_input {
             if *previous == sequence && *hash == digest {
@@ -231,6 +241,9 @@ impl Terminals {
             return Err(rejected());
         }
         let session = self.sessions.get_mut(id).ok_or_else(rejected)?;
+        if Instant::now() >= session.expires || session.idle.elapsed() >= Duration::from_secs(120) {
+            return Err(rejected());
+        }
         let size = libc::winsize {
             ws_row: rows,
             ws_col: columns,

@@ -153,7 +153,7 @@ impl RuntimeContext {
         let encode = |response: Response| {
             format!(
                 "{}\n",
-                serde_json::to_string(&response).expect("response serialization")
+                serde_json::to_string(&response.bounded()).expect("response serialization")
             )
         };
         let Some(authorization) = self.authorization.as_mut() else {
@@ -272,18 +272,14 @@ impl RuntimeContext {
                         }
                     }
                     Operation::VolumeLock { id } => {
-                        // Workloads must release their mounts before a non-lazy unmount.
-                        self.manager.shutdown();
-                        self.authorization
-                            .as_ref()
-                            .unwrap()
-                            .volume_policy(id)
-                            .ok_or("volume_denied")
-                            .and_then(|policy| {
-                                crate::storage::lock(id, policy)
-                                    .map(|_| "locked".into())
-                                    .map_err(|_| "volume_busy_or_lock_failed")
-                            })
+                        match self.authorization.as_ref().unwrap().volume_policy(id).cloned() {
+                            Some(policy) => {
+                                self.terminals.close_all(&mut self.manager);
+                                self.manager.shutdown();
+                                crate::storage::lock(id, &policy).map(|_| "locked".into()).map_err(|_| "volume_busy_or_lock_failed")
+                            }
+                            None => Err("volume_denied"),
+                        }
                     }
                     Operation::VolumeStatus { id } => self
                         .authorization
@@ -315,6 +311,7 @@ impl RuntimeContext {
                                 })
                         }
                     }
+                    Operation::Evidence { challenge } => self.authorization.as_ref().unwrap().evidence(challenge),
                     Operation::Metrics => serde_json::to_string(&serde_json::json!({"jobs":self.manager.samples(),"sessions":self.terminals.len(),"volume_used_bytes":self.authorization.as_ref().unwrap().volume_usage(),"gpu":crate::observability::gpu()})).map_err(|_| "metrics_unavailable"),
                     Operation::RequestOutcome { id } => self.authorization.as_ref().unwrap().outcome(id),
                     Operation::ModelStart { manifest } => (|| {
@@ -381,13 +378,26 @@ impl RuntimeContext {
             }
         };
         let response = match result {
-            Ok(result) if result.starts_with("ERR ") => Response::error(
-                &request.request_id,
-                result.trim().trim_start_matches("ERR "),
-            ),
+            Ok(result)
+                if result.starts_with("ERR ")
+                    && matches!(
+                        request.operation,
+                        Operation::Start { .. }
+                            | Operation::Execute { .. }
+                            | Operation::WorkloadStatus { .. }
+                            | Operation::WorkloadLogs { .. }
+                            | Operation::Stop { .. }
+                    ) =>
+            {
+                Response::error(
+                    &request.request_id,
+                    result.trim().trim_start_matches("ERR "),
+                )
+            }
             Ok(result) => Response::success(&request.request_id, result),
             Err(code) => Response::error(&request.request_id, code),
-        };
+        }
+        .bounded();
         let response = if self
             .authorization
             .as_ref()

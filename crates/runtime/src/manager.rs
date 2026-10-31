@@ -145,6 +145,7 @@ impl Manager {
         if self.jobs.len() >= MAX_WORKLOADS {
             return Ok("ERR capacity-exceeded\n".into());
         }
+        crate::isolated::validate(manifest, template)?;
         let id = self.next_id;
         self.next_id = self
             .next_id
