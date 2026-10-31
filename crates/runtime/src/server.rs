@@ -106,6 +106,7 @@ impl RuntimeContext {
         &mut self,
         manifest: &gammacloud_protocol::structured::ExecutionManifest,
         ttl: u64,
+        request: &SignedEnvelope,
     ) -> Result<String, &'static str> {
         let authorization = self.authorization.as_ref().unwrap();
         if !authorization.attested() {
@@ -122,7 +123,19 @@ impl RuntimeContext {
             return Err("workspace_required");
         }
         self.terminals
-            .open(&mut self.manager, manifest, template, volume, ttl)
+            .open(
+                &mut self.manager,
+                manifest,
+                template,
+                volume,
+                ttl,
+                crate::isolated::LaunchAuthorization {
+                    request,
+                    decision: authorization
+                        .current_decision()
+                        .ok_or("attestation_required")?,
+                },
+            )
             .map_err(|_| "session_open_failed")
     }
 
@@ -180,7 +193,7 @@ impl RuntimeContext {
                     Operation::SessionOpen {
                         manifest,
                         ttl_seconds,
-                    } => self.open_terminal(manifest, *ttl_seconds),
+                    } => self.open_terminal(manifest, *ttl_seconds, &envelope),
                     Operation::AgentLaunch {
                         name,
                         manifest,
@@ -195,7 +208,7 @@ impl RuntimeContext {
                         match profile {
                         Some(profile) if !profile.version.is_empty() && crate::development_agent::DevelopmentAgentKind::from_name(name).is_ok() => {
                             let mut manifest = manifest.clone(); manifest.template = profile.template;
-                            self.open_terminal(&manifest, *ttl_seconds)
+                            self.open_terminal(&manifest, *ttl_seconds, &envelope)
                         }
                         _ => Err("agent_denied"),
                     }
@@ -292,27 +305,25 @@ impl RuntimeContext {
                                 })
                         }
                     }
-                    Operation::Execute { manifest } => {
-                        match self
-                            .authorization
+                    Operation::Execute { manifest } => (|| {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        let template = authorization
+                            .execution_template(&manifest.template)
+                            .ok_or("template_denied")?;
+                        let volume = template
+                            .volume_id
                             .as_ref()
-                            .and_then(|a| a.execution_template(&manifest.template))
-                            .cloned()
-                        {
-                            Some(template) => self
-                                .manager
-                                .execute(
-                                    manifest,
-                                    &template,
-                                    template.volume_id.as_ref().and_then(|id| {
-                                        self.authorization.as_ref().unwrap().volume_policy(id)
-                                    }),
-                                    None,
-                                )
-                                .map_err(|_| "isolation_or_execution_failed"),
-                            None => Err("template_denied"),
-                        }
-                    }
+                            .and_then(|id| authorization.volume_policy(id));
+                        let context = crate::isolated::LaunchAuthorization {
+                            request: &envelope,
+                            decision: authorization
+                                .current_decision()
+                                .ok_or("attestation_required")?,
+                        };
+                        self.manager
+                            .execute(manifest, template, volume, None, context)
+                            .map_err(|_| "isolation_or_execution_failed")
+                    })(),
                     Operation::WorkloadStatus { id } => {
                         self.manager.status(*id).map_err(|_| "operation_failed")
                     }

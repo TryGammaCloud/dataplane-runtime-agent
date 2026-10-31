@@ -16,6 +16,8 @@ struct Workload {
     child: Child,
     profile: String,
     unit: Option<String>,
+    gateway: Option<crate::egress::Gateway>,
+    credential_descriptors: Vec<std::os::fd::OwnedFd>,
     stdout: PathBuf,
     stderr: PathBuf,
     exit_code: Option<i32>,
@@ -90,6 +92,8 @@ impl Manager {
                 child,
                 profile: profile.as_str().into(),
                 unit: None,
+                gateway: None,
+                credential_descriptors: Vec::new(),
                 stdout,
                 stderr,
                 exit_code: None,
@@ -104,6 +108,7 @@ impl Manager {
         template: &crate::isolated::ExecutionTemplate,
         volume: Option<&crate::storage::VolumePolicy>,
         terminal: Option<File>,
+        authorization: crate::isolated::LaunchAuthorization<'_>,
     ) -> std::io::Result<String> {
         if !self.product.allows_workload() {
             return Ok("ERR workload-not-allowed-for-product\n".into());
@@ -122,8 +127,61 @@ impl Manager {
             "gammacloud-job-{}.service",
             crate::authorization::hex(&nonce)
         );
-        let mut command =
-            crate::isolated::command(manifest, template, &unit, volume, terminal.is_some())?;
+        let decision: gammacloud_protocol::structured::AttestationDecision =
+            serde_json::from_str(&authorization.decision.payload)
+                .map_err(|_| std::io::Error::other("decision unavailable"))?;
+        let remaining = decision.expires_at.saturating_sub(
+            crate::authorization::now().map_err(|_| std::io::Error::other("clock unavailable"))?,
+        );
+        if remaining == 0 {
+            return Err(std::io::Error::other("decision expired"));
+        }
+        let mut effective = manifest.clone();
+        effective.timeout_seconds = effective.timeout_seconds.min(remaining);
+        let mut credential_descriptors = Vec::new();
+        let mut credential_paths = Vec::new();
+        use std::os::fd::AsRawFd;
+        for (name, policy) in &template.credentials {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                || policy.lifetime_seconds == 0
+                || policy.lifetime_seconds > 300
+            {
+                return Err(std::io::Error::other("credential policy invalid"));
+            }
+            effective.timeout_seconds = effective.timeout_seconds.min(policy.lifetime_seconds);
+            let fd = crate::storage::credential_descriptor(
+                &policy.reference,
+                &policy.scope,
+                &authorization,
+            )?;
+            credential_paths.push((
+                name.clone(),
+                format!("/proc/{}/fd/{}", std::process::id(), fd.as_raw_fd()),
+            ));
+            credential_descriptors.push(fd);
+        }
+        let gateway = if template.egress.destinations.is_empty() {
+            None
+        } else {
+            Some(crate::egress::Gateway::start(
+                template.egress.clone(),
+                template.uid,
+                std::time::Duration::from_secs(effective.timeout_seconds),
+            )?)
+        };
+        let mut command = crate::isolated::command(
+            &effective,
+            template,
+            &unit,
+            volume,
+            terminal.is_some(),
+            gateway.as_ref().map(|gateway| gateway.path.as_path()),
+            &credential_paths,
+        )?;
         fs::create_dir_all(&self.log_dir)?;
         fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
         let stdout = self.log_dir.join(format!("{id}.stdout"));
@@ -163,6 +221,8 @@ impl Manager {
                 child,
                 profile: manifest.template.clone(),
                 unit: Some(unit),
+                gateway,
+                credential_descriptors,
                 stdout,
                 stderr,
                 exit_code: None,
@@ -232,10 +292,14 @@ impl Manager {
             let status = job.child.wait()?;
             job.exit_code = Some(status.code().unwrap_or(-1));
         }
+        job.gateway.take();
+        job.credential_descriptors.clear();
         Ok(format!("OK id={id} state=exited\n"))
     }
     pub fn shutdown(&mut self) {
         for job in self.jobs.values_mut() {
+            job.gateway.take();
+            job.credential_descriptors.clear();
             if let Some(unit) = &job.unit {
                 let _ = crate::isolated::control(unit, "stop");
             }

@@ -62,10 +62,12 @@ impl NetworkPolicy {
             ));
         }
         if !self.allowlist.is_empty()
-            && !self
-                .allowlist
-                .iter()
-                .any(|allowed| destination.starts_with(allowed))
+            && !self.allowlist.iter().any(|allowed| {
+                destination == allowed
+                    || destination
+                        .strip_prefix(allowed)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
         {
             return Err(format!(
                 "destination {destination} is not in the egress allowlist"

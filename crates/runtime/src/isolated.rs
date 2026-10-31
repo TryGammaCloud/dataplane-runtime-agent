@@ -29,6 +29,23 @@ pub struct ExecutionTemplate {
     pub max_timeout_seconds: u64,
     #[serde(default)]
     pub volume_id: Option<String>,
+    #[serde(default)]
+    pub egress: crate::egress::EgressPolicy,
+    #[serde(default)]
+    pub credentials: BTreeMap<String, CredentialPolicy>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialPolicy {
+    pub reference: String,
+    pub scope: String,
+    pub lifetime_seconds: u64,
+}
+
+pub struct LaunchAuthorization<'a> {
+    pub request: &'a gammacloud_protocol::structured::SignedEnvelope,
+    pub decision: &'a gammacloud_protocol::structured::SignedEnvelope,
 }
 
 pub type Templates = BTreeMap<String, ExecutionTemplate>;
@@ -138,6 +155,8 @@ pub fn command(
     unit: &str,
     volume: Option<&crate::storage::VolumePolicy>,
     interactive: bool,
+    gateway: Option<&std::path::Path>,
+    credentials: &[(String, String)],
 ) -> io::Result<Command> {
     validate(manifest, template)?;
     preflight(template)?;
@@ -213,6 +232,17 @@ pub fn command(
         ));
         command.arg("--property=ReadWritePaths=/workspace");
     }
+    if let Some(path) = gateway {
+        command.arg(format!(
+            "--property=BindReadOnlyPaths={}:/run/gammacloud/egress.sock",
+            path.display()
+        ));
+        command.arg("--setenv=HTTPS_PROXY=http://127.0.0.1:18443");
+        command.arg("--setenv=ALL_PROXY=http://127.0.0.1:18443");
+    }
+    for (name, path) in credentials {
+        command.arg(format!("--property=LoadCredential={name}:{path}"));
+    }
     for (key, value) in &manifest.environment {
         command.arg(format!("--setenv={key}={value}"));
     }
@@ -246,6 +276,7 @@ pub fn command(
             .collect::<io::Result<_>>()?,
         root_device: root.dev(),
         root_inode: root.ino(),
+        egress_lifetime: gateway.map(|_| manifest.timeout_seconds),
     };
     command
         .arg("--")
@@ -301,6 +332,8 @@ mod tests {
             max_pids: 32,
             max_timeout_seconds: 30,
             volume_id: None,
+            egress: Default::default(),
+            credentials: Default::default(),
         };
         let mut manifest = ExecutionManifest {
             template: "base".into(),

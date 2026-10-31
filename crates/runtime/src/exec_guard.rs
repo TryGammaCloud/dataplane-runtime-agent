@@ -24,6 +24,7 @@ pub struct Guard {
     pub original_namespaces: Vec<(String, String)>,
     pub root_device: u64,
     pub root_inode: u64,
+    pub egress_lifetime: Option<u64>,
 }
 
 fn denied() -> io::Error {
@@ -115,6 +116,32 @@ pub fn run(raw: &str) -> io::Result<()> {
     }
     if hex(&digest.finalize()) != guard.digest {
         return Err(denied());
+    }
+    if let Some(lifetime) = guard.egress_lifetime {
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg("--egress-sidecar")
+            .arg(lifetime.to_string())
+            .spawn()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if child.try_wait()?.is_some() {
+                return Err(denied());
+            }
+            if std::net::TcpStream::connect_timeout(
+                &"127.0.0.1:18443".parse().map_err(|_| denied())?,
+                std::time::Duration::from_millis(10),
+            )
+            .is_ok()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(denied());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
     // Exec preserves the verified namespaces, cgroup, credentials and seccomp filter.
     Err(Command::new(&guard.executable)

@@ -11,6 +11,7 @@ mod dev_vsock;
     reason = "Agent catalog interfaces await workload launcher integration."
 )]
 mod development_agent;
+mod egress;
 mod exec_guard;
 #[allow(
     dead_code,
@@ -64,6 +65,16 @@ fn main() -> std::io::Result<()> {
             return Err(std::io::Error::other("invalid guard invocation"));
         }
         return exec_guard::run(&arguments[2]);
+    }
+    if arguments.get(1).map(String::as_str) == Some("--egress-sidecar") {
+        if arguments.len() != 3 || unsafe { libc::geteuid() } == 0 {
+            return Err(std::io::Error::other("invalid sidecar invocation"));
+        }
+        return egress::sidecar(
+            arguments[2]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid lifetime"))?,
+        );
     }
     if arguments.get(1).map(String::as_str) == Some("--workspace-child") {
         if arguments.len() != 3 {

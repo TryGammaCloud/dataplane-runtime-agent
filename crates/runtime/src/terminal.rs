@@ -49,6 +49,7 @@ impl Terminals {
         template: &ExecutionTemplate,
         volume: Option<&VolumePolicy>,
         ttl_seconds: u64,
+        authorization: crate::isolated::LaunchAuthorization<'_>,
     ) -> io::Result<String> {
         self.expire(manager);
         if self.sessions.len() >= 8
@@ -88,7 +89,7 @@ impl Terminals {
         if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        let response = manager.execute(manifest, template, volume, Some(slave))?;
+        let response = manager.execute(manifest, template, volume, Some(slave), authorization)?;
         if response.starts_with("ERR ") {
             return Err(rejected());
         }
