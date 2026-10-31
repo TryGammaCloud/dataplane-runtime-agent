@@ -79,8 +79,13 @@ mod tests {
     #[test]
     fn workspace_allows_safe_relative_paths() {
         let policy = WorkspacePolicy::new("/tmp/workspace", 4, true);
-        let resolved = policy.validate_path(Path::new("project/data/output.txt")).unwrap();
-        assert_eq!(resolved, Path::new("/tmp/workspace/project/data/output.txt"));
+        let resolved = policy
+            .validate_path(Path::new("project/data/output.txt"))
+            .unwrap();
+        assert_eq!(
+            resolved,
+            Path::new("/tmp/workspace/project/data/output.txt")
+        );
     }
 
     #[test]

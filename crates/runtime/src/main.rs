@@ -1,7 +1,7 @@
 //! GammaCloud development guest service entrypoint.
 mod attestation;
-mod development_agent;
 mod dev_vsock;
+mod development_agent;
 mod identity;
 mod manager;
 mod model_runtime;

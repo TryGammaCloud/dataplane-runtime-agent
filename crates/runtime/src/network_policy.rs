@@ -28,7 +28,11 @@ impl NetworkPolicy {
         let mut policy = Self::new();
         let allowlist_raw = std::env::var("GAMMACLOUD_EGRESS_ALLOWLIST").unwrap_or_default();
         if !allowlist_raw.trim().is_empty() {
-            for destination in allowlist_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for destination in allowlist_raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 policy.add_allowed_destination(destination);
             }
         }
@@ -53,17 +57,31 @@ impl NetworkPolicy {
 
     pub fn authorize(&self, destination: &str) -> Result<(), String> {
         if self.deny_by_default && self.allowlist.is_empty() {
-            return Err(format!("destination {destination} is not allowed by policy"));
+            return Err(format!(
+                "destination {destination} is not allowed by policy"
+            ));
         }
-        if !self.allowlist.is_empty() && !self.allowlist.iter().any(|allowed| destination.starts_with(allowed)) {
-            return Err(format!("destination {destination} is not in the egress allowlist"));
+        if !self.allowlist.is_empty()
+            && !self
+                .allowlist
+                .iter()
+                .any(|allowed| destination.starts_with(allowed))
+        {
+            return Err(format!(
+                "destination {destination} is not in the egress allowlist"
+            ));
         }
         Ok(())
     }
 }
 
 impl CredentialLease {
-    pub fn new(name: impl Into<String>, scope: impl Into<String>, expires_at: u64, provider: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        scope: impl Into<String>,
+        expires_at: u64,
+        provider: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             scope: scope.into(),

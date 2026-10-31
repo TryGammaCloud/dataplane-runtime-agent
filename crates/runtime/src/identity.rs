@@ -13,15 +13,20 @@ pub struct OwnerIdentity {
 
 impl OwnerIdentity {
     pub fn from_env() -> Result<Self, String> {
-        let organization_id = env::var("GAMMACLOUD_ORG_ID").unwrap_or_else(|_| "dev-org".to_owned());
-        let project_id = env::var("GAMMACLOUD_PROJECT_ID").unwrap_or_else(|_| "dev-project".to_owned());
-        let sandbox_id = env::var("GAMMACLOUD_SANDBOX_ID").unwrap_or_else(|_| "dev-sandbox".to_owned());
+        let organization_id =
+            env::var("GAMMACLOUD_ORG_ID").unwrap_or_else(|_| "dev-org".to_owned());
+        let project_id =
+            env::var("GAMMACLOUD_PROJECT_ID").unwrap_or_else(|_| "dev-project".to_owned());
+        let sandbox_id =
+            env::var("GAMMACLOUD_SANDBOX_ID").unwrap_or_else(|_| "dev-sandbox".to_owned());
         let owner_public_key = env::var("GAMMACLOUD_OWNER_PUBLIC_KEY")
             .unwrap_or_else(|_| "local-development-identity".to_owned());
         let workload_identity = env::var("GAMMACLOUD_WORKLOAD_IDENTITY")
             .unwrap_or_else(|_| "local-workload".to_owned());
-        let session_id = env::var("GAMMACLOUD_SESSION_ID").unwrap_or_else(|_| "dev-session".to_owned());
-        let policy_version = env::var("GAMMACLOUD_POLICY_VERSION").unwrap_or_else(|_| "dev-policy-v1".to_owned());
+        let session_id =
+            env::var("GAMMACLOUD_SESSION_ID").unwrap_or_else(|_| "dev-session".to_owned());
+        let policy_version =
+            env::var("GAMMACLOUD_POLICY_VERSION").unwrap_or_else(|_| "dev-policy-v1".to_owned());
 
         let identity = Self {
             organization_id,
@@ -32,8 +37,7 @@ impl OwnerIdentity {
             session_id,
             policy_version,
         };
-        identity.validate()?
-;
+        identity.validate()?;
         Ok(identity)
     }
 

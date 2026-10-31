@@ -107,7 +107,9 @@ mod tests {
             .record_evidence("vm-42", "sha256:abc", "v1", "measurement-123")
             .unwrap();
         coordinator.accept().unwrap();
-        coordinator.grant_secret("db-password", "runtime bootstrap", 1234).unwrap();
+        coordinator
+            .grant_secret("db-password", "runtime bootstrap", 1234)
+            .unwrap();
         assert_eq!(coordinator.state, AttestationState::Verified);
         assert!(coordinator.secret_lease.is_some());
     }

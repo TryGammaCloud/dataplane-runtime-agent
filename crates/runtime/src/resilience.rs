@@ -34,7 +34,14 @@ impl Reconciler {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.events.insert(process_id, ReconcileEvent { process_id, state, observed_at });
+        self.events.insert(
+            process_id,
+            ReconcileEvent {
+                process_id,
+                state,
+                observed_at,
+            },
+        );
         if self.events.len() > self.max_history {
             let oldest = self.events.keys().copied().min();
             if let Some(oldest) = oldest {

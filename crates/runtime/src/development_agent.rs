@@ -49,9 +49,21 @@ impl DevelopmentAgentCatalog {
         Self::default()
     }
 
-    pub fn register(&mut self, kind: DevelopmentAgentKind, version: impl Into<String>, enabled: bool) {
+    pub fn register(
+        &mut self,
+        kind: DevelopmentAgentKind,
+        version: impl Into<String>,
+        enabled: bool,
+    ) {
         let version = version.into();
-        self.agents.insert(kind.as_str().to_string(), DevelopmentAgent { kind, enabled, version });
+        self.agents.insert(
+            kind.as_str().to_string(),
+            DevelopmentAgent {
+                kind,
+                enabled,
+                version,
+            },
+        );
     }
 
     pub fn get(&self, name: &str) -> Option<&DevelopmentAgent> {
@@ -70,8 +82,14 @@ mod tests {
 
     #[test]
     fn resolves_supported_agent_types() {
-        assert_eq!(DevelopmentAgentKind::from_name("codex").unwrap(), DevelopmentAgentKind::Codex);
-        assert_eq!(DevelopmentAgentKind::from_name("ClaudeCode").unwrap(), DevelopmentAgentKind::ClaudeCode);
+        assert_eq!(
+            DevelopmentAgentKind::from_name("codex").unwrap(),
+            DevelopmentAgentKind::Codex
+        );
+        assert_eq!(
+            DevelopmentAgentKind::from_name("ClaudeCode").unwrap(),
+            DevelopmentAgentKind::ClaudeCode
+        );
         assert!(DevelopmentAgentKind::from_name("unknown-agent").is_err());
     }
 

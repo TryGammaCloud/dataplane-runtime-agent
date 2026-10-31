@@ -47,7 +47,9 @@ impl RuntimeContext {
         if !self.manager.authorize(stream)? {
             return Ok(false);
         }
-        if self.network_policy.require_attestation && self.attestation.state != crate::attestation::AttestationState::Verified {
+        if self.network_policy.require_attestation
+            && self.attestation.state != crate::attestation::AttestationState::Verified
+        {
             if std::env::var("GAMMACLOUD_REQUIRE_ATTESTATION").as_deref() == Ok("1") {
                 return Ok(false);
             }
@@ -63,9 +65,7 @@ impl RuntimeContext {
             crate::attestation::AttestationState::Unverified => "unverified",
         };
         let session_count = self.session_manager.list_active().len();
-        format!(
-            "state=ready attestation={attestation} confidential=false sessions={session_count}"
-        )
+        format!("state=ready attestation={attestation} confidential=false sessions={session_count}")
     }
 }
 

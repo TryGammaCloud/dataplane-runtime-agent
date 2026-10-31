@@ -132,7 +132,9 @@ mod tests {
             RequestEnvelope::parse("V1 START smoke").unwrap(),
             RequestEnvelope {
                 version: 1,
-                request: Request::Start { profile: Profile::Smoke },
+                request: Request::Start {
+                    profile: Profile::Smoke
+                },
             }
         );
     }

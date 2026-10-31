@@ -44,7 +44,9 @@ impl Session {
     }
 
     pub fn is_expired(&self, now: u64) -> bool {
-        now >= self.expires_at || self.state == SessionState::Expired || self.state == SessionState::Closed
+        now >= self.expires_at
+            || self.state == SessionState::Expired
+            || self.state == SessionState::Closed
     }
 }
 
@@ -110,7 +112,9 @@ mod tests {
         };
 
         let mut sessions = SessionManager::new();
-        let session = sessions.create("session-1", owner, Duration::from_secs(60)).unwrap();
+        let session = sessions
+            .create("session-1", owner, Duration::from_secs(60))
+            .unwrap();
         assert_eq!(session.state, SessionState::Active);
         sessions.close("session-1").unwrap();
         assert_eq!(sessions.list_active().len(), 0);

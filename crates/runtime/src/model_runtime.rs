@@ -80,13 +80,17 @@ mod tests {
     #[test]
     fn manifest_requires_nonempty_name_and_resources() {
         let mut runtime = InferenceRuntime::new();
-        assert!(runtime.install_manifest("demo", "v1", "sha256:abc", true, 0).is_err());
+        assert!(runtime
+            .install_manifest("demo", "v1", "sha256:abc", true, 0)
+            .is_err());
     }
 
     #[test]
     fn health_check_requires_running_state() {
         let mut runtime = InferenceRuntime::new();
-        runtime.install_manifest("demo", "v1", "sha256:abc", true, 2048).unwrap();
+        runtime
+            .install_manifest("demo", "v1", "sha256:abc", true, 2048)
+            .unwrap();
         assert!(runtime.health_check().is_err());
         runtime.mark_running();
         assert!(runtime.health_check().is_ok());
