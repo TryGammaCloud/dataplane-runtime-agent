@@ -4,17 +4,20 @@
     reason = "Attestation interfaces await integration with a trusted external verifier."
 )]
 mod attestation;
+mod authorization;
 mod dev_vsock;
 #[allow(
     dead_code,
     reason = "Agent catalog interfaces await workload launcher integration."
 )]
 mod development_agent;
+mod exec_guard;
 #[allow(
     dead_code,
     reason = "Owner rotation and session binding interfaces await verified enrollment."
 )]
 mod identity;
+mod isolated;
 mod lifecycle;
 mod manager;
 #[allow(
@@ -52,5 +55,15 @@ mod telemetry;
 mod workspace;
 
 fn main() -> std::io::Result<()> {
+    let arguments: Vec<String> = std::env::args().collect();
+    if arguments.get(1).map(String::as_str) == Some("--isolated-child") {
+        if arguments.len() != 3 {
+            return Err(std::io::Error::other("invalid guard invocation"));
+        }
+        return exec_guard::run(&arguments[2]);
+    }
+    if arguments.len() != 1 {
+        return Err(std::io::Error::other("unsupported arguments"));
+    }
     server::serve()
 }

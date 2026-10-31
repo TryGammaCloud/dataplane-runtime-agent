@@ -58,14 +58,6 @@ impl AttestationCoordinator {
         Ok(())
     }
 
-    pub fn accept(&mut self) -> Result<(), String> {
-        if self.evidence.is_none() {
-            return Err("cannot verify without evidence".into());
-        }
-        self.state = AttestationState::Verified;
-        Ok(())
-    }
-
     pub fn reject(&mut self) -> Result<(), String> {
         self.state = AttestationState::Rejected;
         self.secret_lease = None;
@@ -95,22 +87,17 @@ mod tests {
     use super::{AttestationCoordinator, AttestationState};
 
     #[test]
-    fn attestation_requires_evidence_before_accept() {
+    fn local_evidence_does_not_authorize_secrets() {
         let mut coordinator = AttestationCoordinator::new();
-        assert!(coordinator.accept().is_err());
-    }
-
-    #[test]
-    fn secret_is_released_only_after_verification() {
-        let mut coordinator = AttestationCoordinator::new();
+        assert!(coordinator
+            .grant_secret("db-password", "bootstrap", 1234)
+            .is_err());
         coordinator
             .record_evidence("vm-42", "sha256:abc", "v1", "measurement-123")
             .unwrap();
-        coordinator.accept().unwrap();
-        coordinator
-            .grant_secret("db-password", "runtime bootstrap", 1234)
-            .unwrap();
-        assert_eq!(coordinator.state, AttestationState::Verified);
-        assert!(coordinator.secret_lease.is_some());
+        assert_eq!(coordinator.state, AttestationState::Pending);
+        assert!(coordinator
+            .grant_secret("db-password", "bootstrap", 1234)
+            .is_err());
     }
 }
