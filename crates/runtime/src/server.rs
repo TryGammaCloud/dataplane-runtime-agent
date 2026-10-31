@@ -14,7 +14,7 @@ use gammacloud_protocol::structured::{Operation, Response, SignedEnvelope};
 use gammacloud_protocol::{GuestState, Request, RequestEnvelope};
 use std::fs;
 #[cfg(test)]
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -589,6 +589,7 @@ fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
 
@@ -607,7 +608,9 @@ mod tests {
         let shutdown = handle_connection(runtime, &mut server).unwrap();
         drop(server);
         let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
+        // The protocol frames responses with LF, not EOF. Closing a rejected
+        // oversized request can reset the socket while unread request bytes remain.
+        assert!(BufReader::new(client).read_line(&mut response).unwrap() > 0);
         (shutdown, response)
     }
 
@@ -620,7 +623,10 @@ mod tests {
         );
         let mut oversized = vec![b' '; 257];
         oversized.extend_from_slice(b"SHUTDOWN\n");
-        assert!(!exchange(&mut runtime, &oversized).0);
+        assert_eq!(
+            exchange(&mut runtime, &oversized),
+            (false, "ERR invalid-request\n".into())
+        );
         assert_eq!(exchange(&mut runtime, b"HEALTH\n"), (false, "OK\n".into()));
     }
 
