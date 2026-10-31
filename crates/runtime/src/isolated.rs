@@ -33,6 +33,8 @@ pub struct ExecutionTemplate {
     pub egress: crate::egress::EgressPolicy,
     #[serde(default)]
     pub credentials: BTreeMap<String, CredentialPolicy>,
+    #[serde(default)]
+    pub model_directory: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,6 +48,23 @@ pub struct CredentialPolicy {
 pub struct LaunchAuthorization<'a> {
     pub request: &'a gammacloud_protocol::structured::SignedEnvelope,
     pub decision: &'a gammacloud_protocol::structured::SignedEnvelope,
+    pub workload_digest: String,
+}
+
+impl<'a> LaunchAuthorization<'a> {
+    pub fn new<T: Serialize>(
+        request: &'a gammacloud_protocol::structured::SignedEnvelope,
+        decision: &'a gammacloud_protocol::structured::SignedEnvelope,
+        manifest: &T,
+    ) -> io::Result<Self> {
+        let bytes = serde_json::to_vec(manifest)
+            .map_err(|_| io::Error::other("manifest serialization failed"))?;
+        Ok(Self {
+            request,
+            decision,
+            workload_digest: hex(&Sha256::digest(bytes)),
+        })
+    }
 }
 
 pub type Templates = BTreeMap<String, ExecutionTemplate>;
@@ -240,6 +259,9 @@ pub fn command(
         command.arg("--setenv=HTTPS_PROXY=http://127.0.0.1:18443");
         command.arg("--setenv=ALL_PROXY=http://127.0.0.1:18443");
     }
+    if let Some(directory) = &template.model_directory {
+        command.arg(format!("--property=BindReadOnlyPaths={directory}:/models"));
+    }
     for (name, path) in credentials {
         command.arg(format!("--property=LoadCredential={name}:{path}"));
     }
@@ -334,6 +356,7 @@ mod tests {
             volume_id: None,
             egress: Default::default(),
             credentials: Default::default(),
+            model_directory: None,
         };
         let mut manifest = ExecutionManifest {
             template: "base".into(),

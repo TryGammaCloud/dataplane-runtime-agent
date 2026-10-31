@@ -24,6 +24,7 @@ use std::time::Duration;
 struct RuntimeContext {
     authorization: Option<Authorization>,
     terminals: crate::terminal::Terminals,
+    models: crate::inference::Models,
     manager: Manager,
     session_manager: SessionManager,
     #[allow(
@@ -53,6 +54,7 @@ impl RuntimeContext {
         Ok(Self {
             authorization,
             terminals: Default::default(),
+            models: Default::default(),
             manager: Manager::new(log_dir, Policy::from_env()?, product),
             session_manager,
             owner_identity,
@@ -129,12 +131,14 @@ impl RuntimeContext {
                 template,
                 volume,
                 ttl,
-                crate::isolated::LaunchAuthorization {
+                crate::isolated::LaunchAuthorization::new(
                     request,
-                    decision: authorization
+                    authorization
                         .current_decision()
                         .ok_or("attestation_required")?,
-                },
+                    manifest,
+                )
+                .map_err(|_| "invalid_manifest")?,
             )
             .map_err(|_| "session_open_failed")
     }
@@ -305,6 +309,31 @@ impl RuntimeContext {
                                 })
                         }
                     }
+                    Operation::ModelStart { manifest } => (|| {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        let template = authorization
+                            .execution_template(&manifest.execution.template)
+                            .ok_or("template_denied")?;
+                        let context = crate::isolated::LaunchAuthorization::new(
+                            &envelope,
+                            authorization
+                                .current_decision()
+                                .ok_or("attestation_required")?,
+                            manifest,
+                        )
+                        .map_err(|_| "invalid_manifest")?;
+                        self.models
+                            .start(&mut self.manager, manifest, template, context)
+                            .map_err(|_| "model_start_failed")
+                    })(),
+                    Operation::ModelStatus { id } => self
+                        .models
+                        .status(&mut self.manager, id)
+                        .map_err(|_| "model_status_failed"),
+                    Operation::ModelStop { id } => self
+                        .models
+                        .stop(&mut self.manager, id)
+                        .map_err(|_| "model_stop_failed"),
                     Operation::Execute { manifest } => (|| {
                         let authorization = self.authorization.as_ref().unwrap();
                         let template = authorization
@@ -314,12 +343,14 @@ impl RuntimeContext {
                             .volume_id
                             .as_ref()
                             .and_then(|id| authorization.volume_policy(id));
-                        let context = crate::isolated::LaunchAuthorization {
-                            request: &envelope,
-                            decision: authorization
+                        let context = crate::isolated::LaunchAuthorization::new(
+                            &envelope,
+                            authorization
                                 .current_decision()
                                 .ok_or("attestation_required")?,
-                        };
+                            manifest,
+                        )
+                        .map_err(|_| "invalid_manifest")?;
                         self.manager
                             .execute(manifest, template, volume, None, context)
                             .map_err(|_| "isolation_or_execution_failed")

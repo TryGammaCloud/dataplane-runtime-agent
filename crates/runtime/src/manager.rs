@@ -110,7 +110,10 @@ impl Manager {
         terminal: Option<File>,
         authorization: crate::isolated::LaunchAuthorization<'_>,
     ) -> std::io::Result<String> {
-        if !self.product.allows_workload() {
+        if !matches!(
+            self.product,
+            product::Product::Sandbox | product::Product::Models
+        ) {
             return Ok("ERR workload-not-allowed-for-product\n".into());
         }
         if self.jobs.len() >= MAX_WORKLOADS {
@@ -130,6 +133,9 @@ impl Manager {
         let decision: gammacloud_protocol::structured::AttestationDecision =
             serde_json::from_str(&authorization.decision.payload)
                 .map_err(|_| std::io::Error::other("decision unavailable"))?;
+        if decision.workload_digest != authorization.workload_digest {
+            return Err(std::io::Error::other("workload decision mismatch"));
+        }
         let remaining = decision.expires_at.saturating_sub(
             crate::authorization::now().map_err(|_| std::io::Error::other("clock unavailable"))?,
         );
@@ -229,6 +235,14 @@ impl Manager {
             },
         );
         Ok(format!("OK id={id} state=starting\n"))
+    }
+
+    pub fn product(&self) -> product::Product {
+        self.product
+    }
+
+    pub fn unit(&self, id: u64) -> Option<&str> {
+        self.jobs.get(&id).and_then(|job| job.unit.as_deref())
     }
 
     pub fn latest_id(&self) -> Option<u64> {

@@ -18,6 +18,7 @@ mod exec_guard;
     reason = "Owner rotation and session binding interfaces await verified enrollment."
 )]
 mod identity;
+mod inference;
 mod isolated;
 mod lifecycle;
 mod manager;
@@ -65,6 +66,20 @@ fn main() -> std::io::Result<()> {
             return Err(std::io::Error::other("invalid guard invocation"));
         }
         return exec_guard::run(&arguments[2]);
+    }
+    if arguments.get(1).map(String::as_str) == Some("--health-probe") {
+        if arguments.len() != 5 {
+            return Err(std::io::Error::other("invalid probe invocation"));
+        }
+        return inference::health_child(
+            arguments[2]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid descriptor"))?,
+            arguments[3]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid port"))?,
+            &arguments[4],
+        );
     }
     if arguments.get(1).map(String::as_str) == Some("--egress-sidecar") {
         if arguments.len() != 3 || unsafe { libc::geteuid() } == 0 {

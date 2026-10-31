@@ -713,6 +713,7 @@ mod tests {
             boot_nonce: f.authorization.boot_nonce.clone(),
             owner_public_key: hex(f.owner.verifying_key().as_bytes()),
             image_digest: "sha256:expected".into(),
+            workload_digest: "sha256:expected-workload".into(),
             workload_identity: "workload".into(),
             policy_version: "v1".into(),
             owner_epoch: 1,

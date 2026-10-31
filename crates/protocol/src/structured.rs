@@ -92,6 +92,15 @@ pub enum Operation {
         manifest: ExecutionManifest,
         ttl_seconds: u64,
     },
+    ModelStart {
+        manifest: InferenceManifest,
+    },
+    ModelStatus {
+        id: String,
+    },
+    ModelStop {
+        id: String,
+    },
     Execute {
         manifest: ExecutionManifest,
     },
@@ -118,6 +127,9 @@ impl Operation {
             Self::Status => "status",
             Self::Start { .. } => "start",
             Self::Execute { .. } => "execute",
+            Self::ModelStart { .. } => "model_start",
+            Self::ModelStatus { .. } => "model_status",
+            Self::ModelStop { .. } => "model_stop",
             Self::SessionOpen { .. } => "session_open",
             Self::SessionRead { .. } => "session_read",
             Self::SessionWrite { .. } => "session_write",
@@ -144,6 +156,7 @@ pub struct AttestationDecision {
     pub boot_nonce: String,
     pub owner_public_key: String,
     pub image_digest: String,
+    pub workload_digest: String,
     pub workload_identity: String,
     pub policy_version: String,
     pub owner_epoch: u64,
@@ -203,4 +216,20 @@ pub enum FileOperation {
     Mkdir { path: String },
     Remove { path: String, directory: bool },
     Chmod { path: String, mode: u32 },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArtifact {
+    pub relative_path: String,
+    pub sha256: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceManifest {
+    pub id: String,
+    pub execution: ExecutionManifest,
+    pub artifacts: Vec<ModelArtifact>,
+    pub health_port: u16,
+    pub health_path: String,
 }
