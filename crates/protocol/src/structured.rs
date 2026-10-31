@@ -50,6 +50,22 @@ pub enum Operation {
     Start {
         profile: String,
     },
+    VolumeUnlock {
+        id: String,
+    },
+    VolumeRotate {
+        id: String,
+    },
+    VolumeLock {
+        id: String,
+    },
+    VolumeStatus {
+        id: String,
+    },
+    Files {
+        volume_id: String,
+        operation: FileOperation,
+    },
     Execute {
         manifest: ExecutionManifest,
     },
@@ -76,6 +92,11 @@ impl Operation {
             Self::Status => "status",
             Self::Start { .. } => "start",
             Self::Execute { .. } => "execute",
+            Self::VolumeUnlock { .. } => "volume_unlock",
+            Self::VolumeLock { .. } => "volume_lock",
+            Self::VolumeRotate { .. } => "volume_rotate",
+            Self::VolumeStatus { .. } => "volume_status",
+            Self::Files { .. } => "files",
             Self::WorkloadStatus { .. } => "workload_status",
             Self::WorkloadLogs { .. } => "workload_logs",
             Self::Stop { .. } => "stop",
@@ -140,4 +161,14 @@ pub struct ExecutionManifest {
     pub cpu_percent: u32,
     pub max_pids: u32,
     pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileOperation {
+    Read { path: String },
+    Write { path: String, data: String },
+    Mkdir { path: String },
+    Remove { path: String, directory: bool },
+    Chmod { path: String, mode: u32 },
 }

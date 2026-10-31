@@ -43,6 +43,8 @@ mod server;
     reason = "Interactive session transitions await PTY and protocol integration."
 )]
 mod session;
+mod storage;
+mod subprocess;
 #[allow(
     dead_code,
     reason = "Telemetry interfaces await resource sampling and export integration."
@@ -61,6 +63,16 @@ fn main() -> std::io::Result<()> {
             return Err(std::io::Error::other("invalid guard invocation"));
         }
         return exec_guard::run(&arguments[2]);
+    }
+    if arguments.get(1).map(String::as_str) == Some("--workspace-child") {
+        if arguments.len() != 3 {
+            return Err(std::io::Error::other("invalid workspace invocation"));
+        }
+        return storage::file_child(
+            arguments[2]
+                .parse()
+                .map_err(|_| std::io::Error::other("invalid descriptor"))?,
+        );
     }
     if arguments.len() != 1 {
         return Err(std::io::Error::other("unsupported arguments"));
