@@ -45,6 +45,30 @@ impl Profile {
         }
     }
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestEnvelope {
+    pub version: u8,
+    pub request: Request,
+}
+
+impl RequestEnvelope {
+    /// Parse a versioned or legacy request using the same payload grammar.
+    pub fn parse(line: &str) -> Result<Self, &'static str> {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.starts_with("V1 ") {
+            let payload = trimmed.strip_prefix("V1 ").unwrap_or(trimmed);
+            return Ok(Self {
+                version: 1,
+                request: parse_request(payload)?,
+            });
+        }
+        Ok(Self {
+            version: 1,
+            request: parse_request(trimmed)?,
+        })
+    }
+}
+
 /// Parses a bounded ASCII command without accepting arbitrary executables.
 ///
 /// # Errors
@@ -103,6 +127,13 @@ mod tests {
         assert_eq!(
             parse_request("WORKLOAD_LOGS 42"),
             Ok(Request::WorkloadLogs { id: 42 })
+        );
+        assert_eq!(
+            RequestEnvelope::parse("V1 START smoke").unwrap(),
+            RequestEnvelope {
+                version: 1,
+                request: Request::Start { profile: Profile::Smoke },
+            }
         );
     }
     #[test]
