@@ -23,6 +23,7 @@ use std::time::Duration;
 
 struct RuntimeContext {
     authorization: Option<Authorization>,
+    terminals: crate::terminal::Terminals,
     manager: Manager,
     session_manager: SessionManager,
     #[allow(
@@ -51,6 +52,7 @@ impl RuntimeContext {
         let network_policy = NetworkPolicy::from_env().unwrap_or_else(|_| NetworkPolicy::new());
         Ok(Self {
             authorization,
+            terminals: Default::default(),
             manager: Manager::new(log_dir, Policy::from_env()?, product),
             session_manager,
             owner_identity,
@@ -100,6 +102,30 @@ impl RuntimeContext {
 }
 
 impl RuntimeContext {
+    fn open_terminal(
+        &mut self,
+        manifest: &gammacloud_protocol::structured::ExecutionManifest,
+        ttl: u64,
+    ) -> Result<String, &'static str> {
+        let authorization = self.authorization.as_ref().unwrap();
+        if !authorization.attested() {
+            return Err("attestation_required");
+        }
+        let template = authorization
+            .execution_template(&manifest.template)
+            .ok_or("template_denied")?;
+        let volume = template
+            .volume_id
+            .as_ref()
+            .and_then(|id| authorization.volume_policy(id));
+        if volume.is_none() {
+            return Err("workspace_required");
+        }
+        self.terminals
+            .open(&mut self.manager, manifest, template, volume, ttl)
+            .map_err(|_| "session_open_failed")
+    }
+
     fn signed_request(&mut self, raw: &str) -> (String, bool) {
         let encode = |response: Response| {
             format!(
@@ -127,130 +153,182 @@ impl RuntimeContext {
         let result: Result<String, &str> = match identity_result {
             Err(code) => Err(code),
             Ok(true) => {
-                if matches!(request.operation, Operation::Revoke) {
+                if matches!(
+                    request.operation,
+                    Operation::Revoke | Operation::Rotate { .. }
+                ) {
+                    self.terminals.close_all(&mut self.manager);
                     self.manager.shutdown();
                 }
                 Ok("identity_updated".into())
             }
-            Ok(false) => match &request.operation {
-                Operation::Health => Ok("OK".into()),
-                Operation::Status => Ok(self.status_line()),
-                Operation::Start { profile } => {
-                    let profile = match profile.as_str() {
-                        "smoke" => Some(gammacloud_protocol::Profile::Smoke),
-                        "sleep" => Some(gammacloud_protocol::Profile::Sleep),
-                        "worker" => Some(gammacloud_protocol::Profile::Worker),
-                        _ => None,
-                    };
-                    profile.ok_or("profile_denied").and_then(|profile| {
-                        self.manager.start(profile).map_err(|_| "operation_failed")
-                    })
-                }
-                Operation::VolumeUnlock { id } => {
-                    let authorization = self.authorization.as_ref().unwrap();
-                    match (
-                        authorization.volume_policy(id),
-                        authorization.current_decision(),
-                    ) {
-                        (Some(policy), Some(decision)) => {
-                            crate::storage::unlock(id, policy, &envelope, decision)
-                                .map(|_| "mounted".into())
-                                .map_err(|_| "volume_activation_failed")
-                        }
-                        _ => Err("volume_or_attestation_unavailable"),
+            Ok(false) => {
+                match &request.operation {
+                    Operation::Health => Ok("OK".into()),
+                    Operation::Status => Ok(self.status_line()),
+                    Operation::Start { profile } => {
+                        let profile = match profile.as_str() {
+                            "smoke" => Some(gammacloud_protocol::Profile::Smoke),
+                            "sleep" => Some(gammacloud_protocol::Profile::Sleep),
+                            "worker" => Some(gammacloud_protocol::Profile::Worker),
+                            _ => None,
+                        };
+                        profile.ok_or("profile_denied").and_then(|profile| {
+                            self.manager.start(profile).map_err(|_| "operation_failed")
+                        })
                     }
-                }
-                Operation::VolumeRotate { id } => {
-                    let authorization = self.authorization.as_ref().unwrap();
-                    match (
-                        authorization.volume_policy(id),
-                        authorization.current_decision(),
-                    ) {
-                        (Some(policy), Some(decision)) => {
-                            crate::storage::rotate(id, policy, &envelope, decision)
-                                .map(|_| "replacement_key_added".into())
-                                .map_err(|_| "key_rotation_failed")
+                    Operation::SessionOpen {
+                        manifest,
+                        ttl_seconds,
+                    } => self.open_terminal(manifest, *ttl_seconds),
+                    Operation::AgentLaunch {
+                        name,
+                        manifest,
+                        ttl_seconds,
+                    } => {
+                        let profile = self
+                            .authorization
+                            .as_ref()
+                            .unwrap()
+                            .agent_profile(name)
+                            .cloned();
+                        match profile {
+                        Some(profile) if !profile.version.is_empty() && crate::development_agent::DevelopmentAgentKind::from_name(name).is_ok() => {
+                            let mut manifest = manifest.clone(); manifest.template = profile.template;
+                            self.open_terminal(&manifest, *ttl_seconds)
                         }
-                        _ => Err("volume_or_attestation_unavailable"),
+                        _ => Err("agent_denied"),
                     }
-                }
-                Operation::VolumeLock { id } => {
-                    // Workloads must release their mounts before a non-lazy unmount.
-                    self.manager.shutdown();
-                    self.authorization
+                    }
+                    Operation::SessionRead { id, cursor } => self
+                        .terminals
+                        .read(id, *cursor)
+                        .map_err(|_| "session_read_failed"),
+                    Operation::SessionWrite {
+                        id,
+                        sequence,
+                        data_hex,
+                    } => self
+                        .terminals
+                        .write(id, *sequence, data_hex)
+                        .map_err(|_| "session_write_failed"),
+                    Operation::SessionResize { id, rows, columns } => self
+                        .terminals
+                        .resize(id, *rows, *columns)
+                        .map_err(|_| "session_resize_failed"),
+                    Operation::SessionClose { id } => self
+                        .terminals
+                        .close(&mut self.manager, id)
+                        .map_err(|_| "session_close_failed"),
+                    Operation::VolumeUnlock { id } => {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        match (
+                            authorization.volume_policy(id),
+                            authorization.current_decision(),
+                        ) {
+                            (Some(policy), Some(decision)) => {
+                                crate::storage::unlock(id, policy, &envelope, decision)
+                                    .map(|_| "mounted".into())
+                                    .map_err(|_| "volume_activation_failed")
+                            }
+                            _ => Err("volume_or_attestation_unavailable"),
+                        }
+                    }
+                    Operation::VolumeRotate { id } => {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        match (
+                            authorization.volume_policy(id),
+                            authorization.current_decision(),
+                        ) {
+                            (Some(policy), Some(decision)) => {
+                                crate::storage::rotate(id, policy, &envelope, decision)
+                                    .map(|_| "replacement_key_added".into())
+                                    .map_err(|_| "key_rotation_failed")
+                            }
+                            _ => Err("volume_or_attestation_unavailable"),
+                        }
+                    }
+                    Operation::VolumeLock { id } => {
+                        // Workloads must release their mounts before a non-lazy unmount.
+                        self.manager.shutdown();
+                        self.authorization
+                            .as_ref()
+                            .unwrap()
+                            .volume_policy(id)
+                            .ok_or("volume_denied")
+                            .and_then(|policy| {
+                                crate::storage::lock(id, policy)
+                                    .map(|_| "locked".into())
+                                    .map_err(|_| "volume_busy_or_lock_failed")
+                            })
+                    }
+                    Operation::VolumeStatus { id } => self
+                        .authorization
                         .as_ref()
                         .unwrap()
                         .volume_policy(id)
                         .ok_or("volume_denied")
-                        .and_then(|policy| {
-                            crate::storage::lock(id, policy)
-                                .map(|_| "locked".into())
-                                .map_err(|_| "volume_busy_or_lock_failed")
-                        })
-                }
-                Operation::VolumeStatus { id } => self
-                    .authorization
-                    .as_ref()
-                    .unwrap()
-                    .volume_policy(id)
-                    .ok_or("volume_denied")
-                    .map(|policy| {
-                        if crate::storage::ready(id, policy).is_ok() {
-                            "mounted".into()
+                        .map(|policy| {
+                            if crate::storage::ready(id, policy).is_ok() {
+                                "mounted".into()
+                            } else {
+                                "locked_or_unavailable".into()
+                            }
+                        }),
+                    Operation::Files {
+                        volume_id,
+                        operation,
+                    } => {
+                        let authorization = self.authorization.as_ref().unwrap();
+                        if !authorization.attested() {
+                            Err("attestation_required")
                         } else {
-                            "locked_or_unavailable".into()
+                            authorization
+                                .volume_policy(volume_id)
+                                .ok_or("volume_denied")
+                                .and_then(|policy| {
+                                    crate::storage::files(volume_id, policy, operation)
+                                        .map_err(|_| "filesystem_operation_failed")
+                                })
                         }
-                    }),
-                Operation::Files {
-                    volume_id,
-                    operation,
-                } => {
-                    let authorization = self.authorization.as_ref().unwrap();
-                    if !authorization.attested() {
-                        Err("attestation_required")
-                    } else {
-                        authorization
-                            .volume_policy(volume_id)
-                            .ok_or("volume_denied")
-                            .and_then(|policy| {
-                                crate::storage::files(volume_id, policy, operation)
-                                    .map_err(|_| "filesystem_operation_failed")
-                            })
                     }
-                }
-                Operation::Execute { manifest } => {
-                    match self
-                        .authorization
-                        .as_ref()
-                        .and_then(|a| a.execution_template(&manifest.template))
-                        .cloned()
-                    {
-                        Some(template) => self
-                            .manager
-                            .execute(
-                                manifest,
-                                &template,
-                                template.volume_id.as_ref().and_then(|id| {
-                                    self.authorization.as_ref().unwrap().volume_policy(id)
-                                }),
-                            )
-                            .map_err(|_| "isolation_or_execution_failed"),
-                        None => Err("template_denied"),
+                    Operation::Execute { manifest } => {
+                        match self
+                            .authorization
+                            .as_ref()
+                            .and_then(|a| a.execution_template(&manifest.template))
+                            .cloned()
+                        {
+                            Some(template) => self
+                                .manager
+                                .execute(
+                                    manifest,
+                                    &template,
+                                    template.volume_id.as_ref().and_then(|id| {
+                                        self.authorization.as_ref().unwrap().volume_policy(id)
+                                    }),
+                                    None,
+                                )
+                                .map_err(|_| "isolation_or_execution_failed"),
+                            None => Err("template_denied"),
+                        }
                     }
+                    Operation::WorkloadStatus { id } => {
+                        self.manager.status(*id).map_err(|_| "operation_failed")
+                    }
+                    Operation::WorkloadLogs { id } => {
+                        self.manager.logs(*id).map_err(|_| "operation_failed")
+                    }
+                    Operation::Stop { id } => {
+                        self.manager.stop(*id).map_err(|_| "operation_failed")
+                    }
+                    Operation::Shutdown => {
+                        shutdown = true;
+                        Ok("state=stopping".into())
+                    }
+                    _ => Err("operation_denied"),
                 }
-                Operation::WorkloadStatus { id } => {
-                    self.manager.status(*id).map_err(|_| "operation_failed")
-                }
-                Operation::WorkloadLogs { id } => {
-                    self.manager.logs(*id).map_err(|_| "operation_failed")
-                }
-                Operation::Stop { id } => self.manager.stop(*id).map_err(|_| "operation_failed"),
-                Operation::Shutdown => {
-                    shutdown = true;
-                    Ok("state=stopping".into())
-                }
-                _ => Err("operation_denied"),
-            },
+            }
         };
         let response = match result {
             Ok(result) if result.starts_with("ERR ") => Response::error(
@@ -320,6 +398,15 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
         GuestState::Ready.as_str()
     );
     while !lifecycle::stopping() {
+        runtime.terminals.expire(&mut runtime.manager);
+        if runtime
+            .authorization
+            .as_mut()
+            .is_some_and(|authorization| authorization.expire_decision())
+        {
+            runtime.terminals.close_all(&mut runtime.manager);
+            runtime.manager.shutdown();
+        }
         if let Err(error) = lifecycle::wait(
             listener.as_raw_fd(),
             libc::POLLIN,

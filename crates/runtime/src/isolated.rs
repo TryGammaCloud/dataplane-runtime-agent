@@ -137,6 +137,7 @@ pub fn command(
     template: &ExecutionTemplate,
     unit: &str,
     volume: Option<&crate::storage::VolumePolicy>,
+    interactive: bool,
 ) -> io::Result<Command> {
     validate(manifest, template)?;
     preflight(template)?;
@@ -153,11 +154,11 @@ pub fn command(
     command.env_clear().args([
         "--quiet",
         "--wait",
-        "--pipe",
         "--service-type=exec",
         "--expand-environment=no",
         "--description=GammaCloud isolated workload",
     ]);
+    command.arg(if interactive { "--pty" } else { "--pipe" });
     command.arg(format!("--unit={unit}"));
     for property in [
         "NoNewPrivileges=yes".into(),

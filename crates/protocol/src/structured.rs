@@ -66,6 +66,32 @@ pub enum Operation {
         volume_id: String,
         operation: FileOperation,
     },
+    SessionOpen {
+        manifest: ExecutionManifest,
+        ttl_seconds: u64,
+    },
+    SessionRead {
+        id: String,
+        cursor: u64,
+    },
+    SessionWrite {
+        id: String,
+        sequence: u64,
+        data_hex: String,
+    },
+    SessionResize {
+        id: String,
+        rows: u16,
+        columns: u16,
+    },
+    SessionClose {
+        id: String,
+    },
+    AgentLaunch {
+        name: String,
+        manifest: ExecutionManifest,
+        ttl_seconds: u64,
+    },
     Execute {
         manifest: ExecutionManifest,
     },
@@ -92,6 +118,12 @@ impl Operation {
             Self::Status => "status",
             Self::Start { .. } => "start",
             Self::Execute { .. } => "execute",
+            Self::SessionOpen { .. } => "session_open",
+            Self::SessionRead { .. } => "session_read",
+            Self::SessionWrite { .. } => "session_write",
+            Self::SessionResize { .. } => "session_resize",
+            Self::SessionClose { .. } => "session_close",
+            Self::AgentLaunch { .. } => "agent_launch",
             Self::VolumeUnlock { .. } => "volume_unlock",
             Self::VolumeLock { .. } => "volume_lock",
             Self::VolumeRotate { .. } => "volume_rotate",

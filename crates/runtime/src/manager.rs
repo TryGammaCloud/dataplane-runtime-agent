@@ -103,6 +103,7 @@ impl Manager {
         manifest: &gammacloud_protocol::structured::ExecutionManifest,
         template: &crate::isolated::ExecutionTemplate,
         volume: Option<&crate::storage::VolumePolicy>,
+        terminal: Option<File>,
     ) -> std::io::Result<String> {
         if !self.product.allows_workload() {
             return Ok("ERR workload-not-allowed-for-product\n".into());
@@ -121,7 +122,8 @@ impl Manager {
             "gammacloud-job-{}.service",
             crate::authorization::hex(&nonce)
         );
-        let mut command = crate::isolated::command(manifest, template, &unit, volume)?;
+        let mut command =
+            crate::isolated::command(manifest, template, &unit, volume, terminal.is_some())?;
         fs::create_dir_all(&self.log_dir)?;
         fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
         let stdout = self.log_dir.join(format!("{id}.stdout"));
@@ -143,11 +145,18 @@ impl Manager {
                 Ok(())
             });
         }
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(File::create(&stdout)?))
-            .stderr(Stdio::from(File::create(&stderr)?))
-            .spawn()?;
+        if let Some(terminal) = terminal {
+            command
+                .stdin(Stdio::from(terminal.try_clone()?))
+                .stdout(Stdio::from(terminal.try_clone()?))
+                .stderr(Stdio::from(terminal));
+        } else {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(File::create(&stdout)?))
+                .stderr(Stdio::from(File::create(&stderr)?));
+        }
+        let child = command.spawn()?;
         self.jobs.insert(
             id,
             Workload {
@@ -160,6 +169,10 @@ impl Manager {
             },
         );
         Ok(format!("OK id={id} state=starting\n"))
+    }
+
+    pub fn latest_id(&self) -> Option<u64> {
+        self.jobs.last_key_value().map(|(id, _)| *id)
     }
 
     fn refresh(job: &mut Workload) -> std::io::Result<()> {

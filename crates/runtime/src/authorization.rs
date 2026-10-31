@@ -32,6 +32,8 @@ pub struct TrustPolicy {
     #[serde(default)]
     pub execution_templates: crate::isolated::Templates,
     #[serde(default)]
+    pub development_agents: std::collections::BTreeMap<String, crate::terminal::AgentProfile>,
+    #[serde(default)]
     pub volumes: std::collections::BTreeMap<String, crate::storage::VolumePolicy>,
 }
 
@@ -253,6 +255,10 @@ impl Authorization {
         })
     }
 
+    pub fn agent_profile(&self, name: &str) -> Option<&crate::terminal::AgentProfile> {
+        self.policy.development_agents.get(name)
+    }
+
     pub fn volume_policy(&self, id: &str) -> Option<&crate::storage::VolumePolicy> {
         self.policy.volumes.get(id)
     }
@@ -262,6 +268,15 @@ impl Authorization {
 
     pub fn execution_template(&self, name: &str) -> Option<&crate::isolated::ExecutionTemplate> {
         self.policy.execution_templates.get(name)
+    }
+
+    pub fn expire_decision(&mut self) -> bool {
+        if self.verified_until != 0 && !self.attested() {
+            self.verified_until = 0;
+            self.decision = None;
+            return true;
+        }
+        false
     }
 
     pub fn boot_nonce(&self) -> &str {
@@ -383,7 +398,9 @@ impl Authorization {
         record.response = Some(
             if matches!(
                 request.operation,
-                Operation::WorkloadLogs { .. } | Operation::Files { .. }
+                Operation::WorkloadLogs { .. }
+                    | Operation::Files { .. }
+                    | Operation::SessionRead { .. }
             ) {
                 Response::error(&request.request_id, "result_not_retained")
             } else {
@@ -548,6 +565,7 @@ mod tests {
                 require_attestation_for_start: true,
                 execution_templates: Default::default(),
                 volumes: Default::default(),
+                development_agents: Default::default(),
             };
             Self {
                 authorization: Authorization::open(policy, state).unwrap(),
