@@ -19,9 +19,14 @@ use std::time::Duration;
 struct RuntimeContext {
     manager: Manager,
     session_manager: SessionManager,
+    #[allow(
+        dead_code,
+        reason = "Stored identity awaits verified command authorization."
+    )]
     owner_identity: Option<OwnerIdentity>,
     attestation: AttestationCoordinator,
     network_policy: NetworkPolicy,
+    #[allow(dead_code, reason = "Collector awaits resource sampling integration.")]
     telemetry: TelemetryCollector,
 }
 
@@ -49,10 +54,9 @@ impl RuntimeContext {
         }
         if self.network_policy.require_attestation
             && self.attestation.state != crate::attestation::AttestationState::Verified
+            && std::env::var("GAMMACLOUD_REQUIRE_ATTESTATION").as_deref() == Ok("1")
         {
-            if std::env::var("GAMMACLOUD_REQUIRE_ATTESTATION").as_deref() == Ok("1") {
-                return Ok(false);
-            }
+            return Ok(false);
         }
         Ok(true)
     }

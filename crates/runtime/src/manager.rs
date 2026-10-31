@@ -40,8 +40,7 @@ impl Manager {
         self.policy.authorize(stream)
     }
     pub fn start(&mut self, profile: Profile) -> std::io::Result<String> {
-        let capabilities = self.product.capabilities();
-        if !capabilities.workload_execution {
+        if !self.product.allows_workload() {
             return Ok("ERR workload-not-allowed-for-product\n".into());
         }
         if self.jobs.len() >= MAX_WORKLOADS {
