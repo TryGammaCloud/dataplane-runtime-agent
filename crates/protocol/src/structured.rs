@@ -50,6 +50,9 @@ pub enum Operation {
     Start {
         profile: String,
     },
+    Execute {
+        manifest: ExecutionManifest,
+    },
     WorkloadStatus {
         id: u64,
     },
@@ -72,6 +75,7 @@ impl Operation {
             Self::Health => "health",
             Self::Status => "status",
             Self::Start { .. } => "start",
+            Self::Execute { .. } => "execute",
             Self::WorkloadStatus { .. } => "workload_status",
             Self::WorkloadLogs { .. } => "workload_logs",
             Self::Stop { .. } => "stop",
@@ -123,4 +127,17 @@ impl Response {
             result,
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionManifest {
+    pub template: String,
+    pub arguments: Vec<String>,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub working_directory: String,
+    pub memory_mib: u64,
+    pub cpu_percent: u32,
+    pub max_pids: u32,
+    pub timeout_seconds: u64,
 }

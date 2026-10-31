@@ -14,7 +14,8 @@ const MAX_LOG_BYTES: u64 = 4096;
 
 struct Workload {
     child: Child,
-    profile: Profile,
+    profile: String,
+    unit: Option<String>,
     stdout: PathBuf,
     stderr: PathBuf,
     exit_code: Option<i32>,
@@ -87,7 +88,8 @@ impl Manager {
             id,
             Workload {
                 child,
-                profile,
+                profile: profile.as_str().into(),
+                unit: None,
                 stdout,
                 stderr,
                 exit_code: None,
@@ -95,6 +97,70 @@ impl Manager {
         );
         Ok(format!("OK id={id} profile={}\n", profile.as_str()))
     }
+    /// Starts only an authorized immutable template with mandatory OS isolation.
+    pub fn execute(
+        &mut self,
+        manifest: &gammacloud_protocol::structured::ExecutionManifest,
+        template: &crate::isolated::ExecutionTemplate,
+    ) -> std::io::Result<String> {
+        if !self.product.allows_workload() {
+            return Ok("ERR workload-not-allowed-for-product\n".into());
+        }
+        if self.jobs.len() >= MAX_WORKLOADS {
+            return Ok("ERR capacity-exceeded\n".into());
+        }
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("id exhausted"))?;
+        let mut nonce = [0; 16];
+        File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+        let unit = format!(
+            "gammacloud-job-{}.service",
+            crate::authorization::hex(&nonce)
+        );
+        let mut command = crate::isolated::command(manifest, template, &unit)?;
+        fs::create_dir_all(&self.log_dir)?;
+        fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
+        let stdout = self.log_dir.join(format!("{id}.stdout"));
+        let stderr = self.log_dir.join(format!("{id}.stderr"));
+        // The wrapper forwards output to these files; cap its file writes on disk.
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let limit = libc::rlimit {
+                    rlim_cur: 1_048_576,
+                    rlim_max: 1_048_576,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(File::create(&stdout)?))
+            .stderr(Stdio::from(File::create(&stderr)?))
+            .spawn()?;
+        self.jobs.insert(
+            id,
+            Workload {
+                child,
+                profile: manifest.template.clone(),
+                unit: Some(unit),
+                stdout,
+                stderr,
+                exit_code: None,
+            },
+        );
+        Ok(format!("OK id={id} state=starting\n"))
+    }
+
     fn refresh(job: &mut Workload) -> std::io::Result<()> {
         if job.exit_code.is_none() {
             if let Some(status) = job.child.try_wait()? {
@@ -144,6 +210,9 @@ impl Manager {
             return Ok("ERR unknown-id\n".into());
         };
         Self::refresh(job)?;
+        if let Some(unit) = &job.unit {
+            crate::isolated::control(unit, "stop")?;
+        }
         if job.exit_code.is_none() {
             kill_process_group(job.child.id())?;
             let status = job.child.wait()?;
@@ -153,6 +222,9 @@ impl Manager {
     }
     pub fn shutdown(&mut self) {
         for job in self.jobs.values_mut() {
+            if let Some(unit) = &job.unit {
+                let _ = crate::isolated::control(unit, "stop");
+            }
             if job.exit_code.is_none() {
                 let _ = kill_process_group(job.child.id());
                 if let Ok(status) = job.child.wait() {

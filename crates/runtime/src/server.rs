@@ -146,6 +146,20 @@ impl RuntimeContext {
                         self.manager.start(profile).map_err(|_| "operation_failed")
                     })
                 }
+                Operation::Execute { manifest } => {
+                    match self
+                        .authorization
+                        .as_ref()
+                        .and_then(|a| a.execution_template(&manifest.template))
+                        .cloned()
+                    {
+                        Some(template) => self
+                            .manager
+                            .execute(manifest, &template)
+                            .map_err(|_| "isolation_or_execution_failed"),
+                        None => Err("template_denied"),
+                    }
+                }
                 Operation::WorkloadStatus { id } => {
                     self.manager.status(*id).map_err(|_| "operation_failed")
                 }
