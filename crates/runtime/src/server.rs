@@ -2,6 +2,7 @@
 use crate::attestation::AttestationCoordinator;
 use crate::dev_vsock;
 use crate::identity::OwnerIdentity;
+use crate::lifecycle;
 use crate::manager::Manager;
 use crate::network_policy::NetworkPolicy;
 use crate::product;
@@ -10,7 +11,9 @@ use crate::session::SessionManager;
 use crate::telemetry::TelemetryCollector;
 use gammacloud_protocol::{GuestState, Request, RequestEnvelope};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -74,6 +77,7 @@ impl RuntimeContext {
 }
 
 pub fn serve() -> std::io::Result<()> {
+    let _signals = lifecycle::Signals::install()?;
     let path = std::env::var("GAMMACLOUD_RUNTIME_SOCKET")
         .unwrap_or_else(|_| "/run/gammacloud/runtime.sock".into());
     let socket = Path::new(&path);
@@ -87,11 +91,15 @@ pub fn serve() -> std::io::Result<()> {
         ));
     }
     let listener = UnixListener::bind(socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
-    let result = serve_listener(&listener, socket, log_dir);
+    let result = (|| {
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        serve_listener(&listener, socket, log_dir)
+    })();
     let _ = fs::remove_file(socket);
     result
 }
@@ -104,10 +112,30 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
         "gammacloud-runtime state={} attestation=unverified confidential=false",
         GuestState::Ready.as_str()
     );
-    for incoming in listener.incoming() {
-        let mut stream = match incoming {
-            Ok(stream) => stream,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+    while !lifecycle::stopping() {
+        if let Err(error) = lifecycle::wait(
+            listener.as_raw_fd(),
+            libc::POLLIN,
+            lifecycle::connection_deadline(),
+        ) {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+            ) {
+                continue;
+            }
+            return Err(error);
+        }
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
             Err(error) => return Err(error),
         };
         match handle_connection(&mut runtime, &mut stream) {
@@ -127,23 +155,21 @@ fn handle_connection(
     runtime: &mut RuntimeContext,
     stream: &mut std::os::unix::net::UnixStream,
 ) -> std::io::Result<bool> {
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_nonblocking(true)?;
+    let deadline = lifecycle::connection_deadline();
     if !runtime.authorized(stream)? {
-        stream.write_all(b"ERR unauthorized-peer\n")?;
+        lifecycle::write_response(stream, b"ERR unauthorized-peer\n", deadline)?;
         return Ok(false);
     }
-    let mut request = String::new();
-    // At most 256 wire-content bytes plus CRLF; reject truncated frames.
-    BufReader::new(&*stream).take(258).read_line(&mut request)?;
+    let request = lifecycle::read_frame(stream, deadline)?;
     if !request.ends_with('\n') || request.trim_end_matches(['\r', '\n']).len() > 256 {
-        stream.write_all(b"ERR invalid-request\n")?;
+        lifecycle::write_response(stream, b"ERR invalid-request\n", deadline)?;
         return Ok(false);
     }
     let envelope = match RequestEnvelope::parse(&request) {
         Ok(envelope) => envelope,
         Err(error) => {
-            stream.write_all(format!("ERR {error}\n").as_bytes())?;
+            lifecycle::write_response(stream, format!("ERR {error}\n").as_bytes(), deadline)?;
             return Ok(false);
         }
     };
@@ -161,7 +187,7 @@ fn handle_connection(
         Request::Stop { id } => runtime.manager.stop(id),
     }
     .unwrap_or_else(|_| "ERR operation-failed\n".into());
-    let result = stream.write_all(response.as_bytes());
+    let result = lifecycle::write_response(stream, response.as_bytes(), deadline);
     // A disconnected caller must not cancel an already authorized shutdown.
     if shutdown {
         return Ok(true);
