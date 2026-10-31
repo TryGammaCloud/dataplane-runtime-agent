@@ -69,3 +69,15 @@ Set `GAMMACLOUD_DEV_VSOCK_BRIDGE=1` **inside a disposable, unverified developmen
 **Not production-safe:** The bridge does not authenticate the host or verify AMD SEV-SNP attestation. Never enable it for customer workloads or secrets. This bridge is not enabled by default. The guest image must include this runtime binary and configure the environment flag explicitly for development.
 
 The host-side development launcher and client are in `dataplane-node-agent/scripts/dev-vm.py`. This is a transport increment; end-to-end QEMU/NixOS validation is required before calling the integration complete.
+
+## Experimental signed runtime implementation
+
+The proposed signed v2 path is documented in [SIGNED_PROTOCOL.md](docs/SIGNED_PROTOCOL.md).
+It is enabled only by an OS-provisioned policy and keeps the legacy development API
+separate. It connects authorized execution, volume/workspace operations, PTYs,
+egress/credentials, inference supervision and resource/recovery services.
+
+See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the state of each
+mission task and [deferred integration scenarios](docs/INTEGRATION_TEST_PLAN.md).
+These additions require reviewed OS provisioning and external verifier/key services;
+compilation does not establish production safety or hardware confidentiality.

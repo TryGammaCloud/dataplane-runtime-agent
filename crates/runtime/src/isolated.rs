@@ -168,15 +168,28 @@ fn preflight(template: &ExecutionTemplate) -> io::Result<()> {
     Ok(())
 }
 
+pub struct LaunchOptions<'a> {
+    pub unit: &'a str,
+    pub volume: Option<&'a crate::storage::VolumePolicy>,
+    pub interactive: bool,
+    pub gateway: Option<&'a std::path::Path>,
+    pub credentials: &'a [(String, String)],
+    pub deadline_boot_nanos: u64,
+}
+
 pub fn command(
     manifest: &ExecutionManifest,
     template: &ExecutionTemplate,
-    unit: &str,
-    volume: Option<&crate::storage::VolumePolicy>,
-    interactive: bool,
-    gateway: Option<&std::path::Path>,
-    credentials: &[(String, String)],
+    options: LaunchOptions<'_>,
 ) -> io::Result<Command> {
+    let LaunchOptions {
+        unit,
+        volume,
+        interactive,
+        gateway,
+        credentials,
+        deadline_boot_nanos,
+    } = options;
     validate(manifest, template)?;
     preflight(template)?;
     if template.volume_id.is_some() != volume.is_some() {
@@ -199,6 +212,8 @@ pub fn command(
     command.arg(if interactive { "--pty" } else { "--pipe" });
     command.arg(format!("--unit={unit}"));
     for property in [
+        "BindsTo=gammacloud-runtime.service".into(),
+        "After=gammacloud-runtime.service".into(),
         "NoNewPrivileges=yes".into(),
         "CapabilityBoundingSet=".into(),
         "AmbientCapabilities=".into(),
@@ -221,7 +236,6 @@ pub fn command(
         "RemoveIPC=yes".into(),
         "SystemCallArchitectures=native".into(),
         "SystemCallFilter=@system-service".into(),
-        "SystemCallFilter=~@mount @privileged @reboot @raw-io @swap".into(),
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6".into(),
         "KillMode=control-group".into(),
         "TimeoutStopSec=5s".into(),
@@ -299,6 +313,7 @@ pub fn command(
         root_device: root.dev(),
         root_inode: root.ino(),
         egress_lifetime: gateway.map(|_| manifest.timeout_seconds),
+        deadline_boot_nanos,
     };
     command
         .arg("--")

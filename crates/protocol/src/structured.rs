@@ -92,6 +92,13 @@ pub enum Operation {
         manifest: ExecutionManifest,
         ttl_seconds: u64,
     },
+    Evidence {
+        challenge: String,
+    },
+    Metrics,
+    RequestOutcome {
+        id: String,
+    },
     ModelStart {
         manifest: InferenceManifest,
     },
@@ -128,6 +135,9 @@ impl Operation {
             Self::Start { .. } => "start",
             Self::Execute { .. } => "execute",
             Self::ModelStart { .. } => "model_start",
+            Self::Metrics => "metrics",
+            Self::Evidence { .. } => "evidence",
+            Self::RequestOutcome { .. } => "request_outcome",
             Self::ModelStatus { .. } => "model_status",
             Self::ModelStop { .. } => "model_stop",
             Self::SessionOpen { .. } => "session_open",
@@ -175,6 +185,13 @@ pub struct Response {
 }
 
 impl Response {
+    pub fn bounded(self) -> Self {
+        match serde_json::to_vec(&self) {
+            Ok(bytes) if bytes.len() < MAX_FRAME_BYTES => self,
+            _ => Self::error(&self.request_id, "response_too_large"),
+        }
+    }
+
     pub fn error(id: &str, code: &str) -> Self {
         Self {
             version: VERSION,
