@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 gammacloud-protocol = { path = "../protocol" }
+libc = "0.2.191"

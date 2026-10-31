@@ -2,6 +2,7 @@
 use crate::attestation::AttestationCoordinator;
 use crate::dev_vsock;
 use crate::identity::OwnerIdentity;
+use crate::lifecycle;
 use crate::manager::Manager;
 use crate::network_policy::NetworkPolicy;
 use crate::product;
@@ -10,7 +11,9 @@ use crate::session::SessionManager;
 use crate::telemetry::TelemetryCollector;
 use gammacloud_protocol::{GuestState, Request, RequestEnvelope};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -74,6 +77,7 @@ impl RuntimeContext {
 }
 
 pub fn serve() -> std::io::Result<()> {
+    let _signals = lifecycle::Signals::install()?;
     let path = std::env::var("GAMMACLOUD_RUNTIME_SOCKET")
         .unwrap_or_else(|_| "/run/gammacloud/runtime.sock".into());
     let socket = Path::new(&path);
@@ -87,11 +91,15 @@ pub fn serve() -> std::io::Result<()> {
         ));
     }
     let listener = UnixListener::bind(socket)?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+
     let log_dir = std::env::var("GAMMACLOUD_RUNTIME_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/run/gammacloud/workloads"));
-    let result = serve_listener(&listener, socket, log_dir);
+    let result = (|| {
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        serve_listener(&listener, socket, log_dir)
+    })();
     let _ = fs::remove_file(socket);
     result
 }
@@ -104,38 +112,159 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
         "gammacloud-runtime state={} attestation=unverified confidential=false",
         GuestState::Ready.as_str()
     );
-    for incoming in listener.incoming() {
-        let mut stream = incoming?;
-        if !runtime.authorized(&stream)? {
-            stream.write_all(b"ERR unauthorized-peer\n")?;
-            continue;
+    while !lifecycle::stopping() {
+        if let Err(error) = lifecycle::wait(
+            listener.as_raw_fd(),
+            libc::POLLIN,
+            lifecycle::connection_deadline(),
+        ) {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+            ) {
+                continue;
+            }
+            return Err(error);
         }
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        let mut request = String::new();
-        BufReader::new(&stream).take(257).read_line(&mut request)?;
-
-        let envelope = RequestEnvelope::parse(&request);
-        let response = match &envelope {
-            Ok(envelope) => match envelope.request {
-                Request::Health => "OK\n".into(),
-                Request::Status => format!("{}\n", runtime.status_line()),
-                Request::Shutdown => {
-                    let _ = runtime.attestation.reject();
-                    "state=stopping\n".into()
-                }
-                Request::Start { profile } => runtime.manager.start(profile)?,
-                Request::WorkloadStatus { id } => runtime.manager.status(id)?,
-                Request::WorkloadLogs { id } => runtime.manager.logs(id)?,
-                Request::Stop { id } => runtime.manager.stop(id)?,
-            },
-            Err(err) => format!("ERR {err}\n"),
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
+            Err(error) => return Err(error),
         };
-        stream.write_all(response.as_bytes())?;
-        if matches!(&envelope, Ok(envelope) if matches!(envelope.request, Request::Shutdown)) {
-            break;
+        match handle_connection(&mut runtime, &mut stream) {
+            Ok(true) => break,
+            Ok(false) => {}
+            // Never log request contents or OS error details that may contain paths.
+            Err(_) => eprintln!("gammacloud-runtime event=connection-failed"),
         }
     }
     runtime.manager.shutdown();
     println!("gammacloud-runtime state={}", GuestState::Stopped.as_str());
     Ok(())
+}
+
+/// Handles one development connection; only an authorized SHUTDOWN stops service.
+fn handle_connection(
+    runtime: &mut RuntimeContext,
+    stream: &mut std::os::unix::net::UnixStream,
+) -> std::io::Result<bool> {
+    stream.set_nonblocking(true)?;
+    let deadline = lifecycle::connection_deadline();
+    if !runtime.authorized(stream)? {
+        lifecycle::write_response(stream, b"ERR unauthorized-peer\n", deadline)?;
+        return Ok(false);
+    }
+    let request = lifecycle::read_frame(stream, deadline)?;
+    if !request.ends_with('\n') || request.trim_end_matches(['\r', '\n']).len() > 256 {
+        lifecycle::write_response(stream, b"ERR invalid-request\n", deadline)?;
+        return Ok(false);
+    }
+    let envelope = match RequestEnvelope::parse(&request) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            lifecycle::write_response(stream, format!("ERR {error}\n").as_bytes(), deadline)?;
+            return Ok(false);
+        }
+    };
+    let shutdown = matches!(envelope.request, Request::Shutdown);
+    let response = match envelope.request {
+        Request::Health => Ok("OK\n".into()),
+        Request::Status => Ok(format!("{}\n", runtime.status_line())),
+        Request::Shutdown => {
+            let _ = runtime.attestation.reject();
+            Ok("state=stopping\n".into())
+        }
+        Request::Start { profile } => runtime.manager.start(profile),
+        Request::WorkloadStatus { id } => runtime.manager.status(id),
+        Request::WorkloadLogs { id } => runtime.manager.logs(id),
+        Request::Stop { id } => runtime.manager.stop(id),
+    }
+    .unwrap_or_else(|_| "ERR operation-failed\n".into());
+    let result = lifecycle::write_response(stream, response.as_bytes(), deadline);
+    // A disconnected caller must not cancel an already authorized shutdown.
+    if shutdown {
+        return Ok(true);
+    }
+    result?;
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    fn runtime() -> RuntimeContext {
+        RuntimeContext::new(
+            PathBuf::from("/dev/null/workloads"),
+            product::Product::Sandbox,
+        )
+        .unwrap()
+    }
+
+    fn exchange(runtime: &mut RuntimeContext, request: &[u8]) -> (bool, String) {
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let shutdown = handle_connection(runtime, &mut server).unwrap();
+        drop(server);
+        let mut response = String::new();
+        // The protocol frames responses with LF, not EOF. Closing a rejected
+        // oversized request can reset the socket while unread request bytes remain.
+        assert!(BufReader::new(client).read_line(&mut response).unwrap() > 0);
+        (shutdown, response)
+    }
+
+    #[test]
+    fn incomplete_and_oversized_frames_do_not_execute() {
+        let mut runtime = runtime();
+        assert_eq!(
+            exchange(&mut runtime, b"SHUTDOWN").1,
+            "ERR invalid-request\n"
+        );
+        let mut oversized = vec![b' '; 257];
+        oversized.extend_from_slice(b"SHUTDOWN\n");
+        assert_eq!(
+            exchange(&mut runtime, &oversized),
+            (false, "ERR invalid-request\n".into())
+        );
+        assert_eq!(exchange(&mut runtime, b"HEALTH\n"), (false, "OK\n".into()));
+    }
+
+    #[test]
+    fn operation_failure_keeps_runtime_available() {
+        let mut runtime = runtime();
+        assert_eq!(
+            exchange(&mut runtime, b"START smoke\n").1,
+            "ERR operation-failed\n"
+        );
+        assert_eq!(exchange(&mut runtime, b"V1 HEALTH\n").1, "OK\n");
+    }
+
+    #[test]
+    fn shutdown_survives_failed_acknowledgement() {
+        let mut runtime = runtime();
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(b"SHUTDOWN\n").unwrap();
+        client.shutdown(Shutdown::Both).unwrap();
+        assert!(handle_connection(&mut runtime, &mut server).unwrap());
+    }
+
+    #[test]
+    fn invalid_utf8_only_fails_its_connection() {
+        let mut runtime = runtime();
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(b"\xff\n").unwrap();
+        assert!(handle_connection(&mut runtime, &mut server).is_err());
+        assert_eq!(exchange(&mut runtime, b"HEALTH\r\n").1, "OK\n");
+    }
 }

@@ -15,6 +15,7 @@ mod development_agent;
     reason = "Owner rotation and session binding interfaces await verified enrollment."
 )]
 mod identity;
+mod lifecycle;
 mod manager;
 #[allow(
     dead_code,
