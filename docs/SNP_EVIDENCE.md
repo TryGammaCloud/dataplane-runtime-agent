@@ -1,5 +1,7 @@
 # Raw SEV-SNP evidence adapter — hardware validation pending
 
+> État actualisé : [finalisation du Prompt 3](PROMPT3_FINALIZATION.md). Les limitations et changements de contrat de ce rapport priment sur cette description historique.
+
 Signed `evidence` accepts a verifier-provided 32-byte challenge encoded as lowercase
 hex. Runtime builds a deterministic JSON context binding the challenge to
 organization/project/sandbox/guest, current boot nonce, owner key/epoch, declared

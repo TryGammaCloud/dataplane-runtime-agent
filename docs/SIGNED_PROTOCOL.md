@@ -1,5 +1,7 @@
 # Signed protocol v2 — experimental integration
 
+> État actualisé : [finalisation du Prompt 3](PROMPT3_FINALIZATION.md). Les limitations et changements de contrat de ce rapport priment sur cette description historique.
+
 ## Activation and trust
 
 An OS-provisioned `/etc/gammacloud/runtime-policy.json` enables signed mode. It must
@@ -53,11 +55,15 @@ or unauthorized payloads return an empty request ID because that ID is not trust
 - `attest`: owner-signed request carrying an independent signed decision. The inner
   signature domain is `gammacloud.runtime.attestation.v2\0`; the exact payload binds
   guest, boot nonce, owner key, image digest, workload identity, policy, epoch and
-  validity interval. The decision lifetime is at most 300 seconds.
+  validity interval, challenge, evidence digest and workload digest. The decision
+  lifetime is at most 300 seconds; local evidence must be less than 60 seconds old
+  and is consumed by one decision. See the finalization report for the digest encoding.
 
-Other operations are health/status, fixed-profile start, workload status/logs, stop
-and shutdown, with a separate policy permission for each. Arbitrary execution remains
-unavailable. The old local `AttestationCoordinator::accept()` has been removed.
+Other operations include health/status, isolated execute, workload status/logs, stop
+and shutdown, with a separate policy permission for each. Structured `start` is
+refused; development profiles remain on the development protocol only. Execution
+requires an approved isolated template. `AttestationCoordinator::verify_decision`
+requires a verifier signature and a matching fresh local proof.
 A signed decision does not establish hardware correctness unless the external
 verifier actually validates SNP evidence. No disk keys or credentials cross this API.
 

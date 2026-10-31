@@ -1,5 +1,7 @@
 # État de la mission Runtime Agent
 
+> État actualisé : [finalisation du Prompt 3](PROMPT3_FINALIZATION.md). Les limitations et changements de contrat de ce rapport priment sur cette description historique.
+
 État du code proposé dans la pile de PR après le socle `9f55d96`.
 **Aucun statut ci-dessous ne signifie « prêt pour la production ».** Les tests ne
 sont pas exécutés localement pendant cette mission ; la compilation ne démontre

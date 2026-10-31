@@ -1,5 +1,7 @@
 # T01 — Audit du Runtime Agent existant
 
+> État actualisé : [finalisation du Prompt 3](PROMPT3_FINALIZATION.md). Les limitations et changements de contrat de ce rapport priment sur cette description historique.
+
 ## Vue d'ensemble
 
 Le dépôt actuel est un runtime Rust de type guest-local qui fournit :
