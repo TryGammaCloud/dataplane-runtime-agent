@@ -50,6 +50,7 @@ mod subprocess;
     reason = "Telemetry interfaces await resource sampling and export integration."
 )]
 mod telemetry;
+mod terminal;
 #[allow(
     dead_code,
     reason = "Workspace interfaces await filesystem and volume lifecycle integration."
