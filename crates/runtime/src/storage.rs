@@ -162,6 +162,13 @@ pub fn ready(id: &str, policy: &VolumePolicy) -> io::Result<File> {
         return Err(denied());
     }
     let root = File::open(root)?;
+    let mut flags: libc::statvfs = unsafe { std::mem::zeroed() };
+    let required = libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+    if unsafe { libc::fstatvfs(root.as_raw_fd(), &mut flags) } != 0
+        || flags.f_flag & required != required
+    {
+        return Err(denied());
+    }
     quota(&root, policy, false)?;
     Ok(root)
 }
@@ -244,6 +251,11 @@ pub fn unlock(
         crate::subprocess::output(&mut command, Duration::from_secs(30), 1024)?;
     }
     if uuid(&mapper)? != policy.filesystem_uuid {
+        return Err(denied());
+    }
+    let release: gammacloud_protocol::structured::AttestationDecision =
+        serde_json::from_str(&decision.payload).map_err(|_| denied())?;
+    if crate::authorization::now().map_err(|_| denied())? >= release.expires_at {
         return Err(denied());
     }
     let mount_path = Path::new(&policy.mount_path);

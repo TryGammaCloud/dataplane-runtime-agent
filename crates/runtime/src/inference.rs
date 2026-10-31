@@ -124,8 +124,9 @@ impl Models {
         Ok(serde_json::json!({"id":id,"ready":ready,"job":job}).to_string())
     }
     pub fn stop(&mut self, manager: &mut Manager, id: &str) -> io::Result<String> {
-        if let Some(model) = self.models.remove(id) {
+        if let Some(model) = self.models.get(id) {
             manager.stop(model.job)?;
+            self.models.remove(id);
         }
         Ok("stopped".into())
     }
@@ -207,6 +208,9 @@ pub fn health_child(fd: i32, port: u16, path: &str) -> io::Result<()> {
         if response.ends_with(b"\r\n") {
             break;
         }
+    }
+    if !response.ends_with(b"\r\n") {
+        return Err(rejected());
     }
     let first = std::str::from_utf8(&response).map_err(|_| rejected())?;
     let words: Vec<&str> = first.split_whitespace().collect();
