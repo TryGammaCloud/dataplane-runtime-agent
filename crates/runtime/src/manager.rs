@@ -102,6 +102,7 @@ impl Manager {
         &mut self,
         manifest: &gammacloud_protocol::structured::ExecutionManifest,
         template: &crate::isolated::ExecutionTemplate,
+        volume: Option<&crate::storage::VolumePolicy>,
     ) -> std::io::Result<String> {
         if !self.product.allows_workload() {
             return Ok("ERR workload-not-allowed-for-product\n".into());
@@ -120,7 +121,7 @@ impl Manager {
             "gammacloud-job-{}.service",
             crate::authorization::hex(&nonce)
         );
-        let mut command = crate::isolated::command(manifest, template, &unit)?;
+        let mut command = crate::isolated::command(manifest, template, &unit, volume)?;
         fs::create_dir_all(&self.log_dir)?;
         fs::set_permissions(&self.log_dir, fs::Permissions::from_mode(0o700))?;
         let stdout = self.log_dir.join(format!("{id}.stdout"));

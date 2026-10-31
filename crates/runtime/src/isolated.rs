@@ -27,6 +27,8 @@ pub struct ExecutionTemplate {
     pub max_cpu_percent: u32,
     pub max_pids: u32,
     pub max_timeout_seconds: u64,
+    #[serde(default)]
+    pub volume_id: Option<String>,
 }
 
 pub type Templates = BTreeMap<String, ExecutionTemplate>;
@@ -134,9 +136,19 @@ pub fn command(
     manifest: &ExecutionManifest,
     template: &ExecutionTemplate,
     unit: &str,
+    volume: Option<&crate::storage::VolumePolicy>,
 ) -> io::Result<Command> {
     validate(manifest, template)?;
     preflight(template)?;
+    if template.volume_id.is_some() != volume.is_some() {
+        return Err(io::Error::other("workspace unavailable"));
+    }
+    if let Some(volume) = volume {
+        if volume.uid != template.uid || volume.gid != template.gid {
+            return Err(io::Error::other("workspace identity mismatch"));
+        }
+        crate::storage::ready(template.volume_id.as_ref().unwrap(), volume)?;
+    }
     let mut command = Command::new(SYSTEMD_RUN);
     command.env_clear().args([
         "--quiet",
@@ -192,6 +204,13 @@ pub fn command(
         format!("RuntimeMaxSec={}s", manifest.timeout_seconds),
     ] {
         command.arg(format!("--property={property}"));
+    }
+    if let Some(volume) = volume {
+        command.arg(format!(
+            "--property=BindPaths={}/workspace:/workspace",
+            volume.mount_path
+        ));
+        command.arg("--property=ReadWritePaths=/workspace");
     }
     for (key, value) in &manifest.environment {
         command.arg(format!("--setenv={key}={value}"));
@@ -280,6 +299,7 @@ mod tests {
             max_cpu_percent: 100,
             max_pids: 32,
             max_timeout_seconds: 30,
+            volume_id: None,
         };
         let mut manifest = ExecutionManifest {
             template: "base".into(),

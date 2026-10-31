@@ -31,6 +31,8 @@ pub struct TrustPolicy {
     pub require_attestation_for_start: bool,
     #[serde(default)]
     pub execution_templates: crate::isolated::Templates,
+    #[serde(default)]
+    pub volumes: std::collections::BTreeMap<String, crate::storage::VolumePolicy>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ pub struct Authorization {
     boot_nonce: String,
     state: PathBuf,
     verified_until: u64,
+    decision: Option<SignedEnvelope>,
     journal_lock: File,
 }
 
@@ -245,8 +248,16 @@ impl Authorization {
             boot_nonce: hex(&nonce),
             state,
             verified_until: 0,
+            decision: None,
             journal_lock,
         })
+    }
+
+    pub fn volume_policy(&self, id: &str) -> Option<&crate::storage::VolumePolicy> {
+        self.policy.volumes.get(id)
+    }
+    pub fn current_decision(&self) -> Option<&SignedEnvelope> {
+        self.decision.as_ref().filter(|_| self.attested())
     }
 
     pub fn execution_template(&self, name: &str) -> Option<&crate::isolated::ExecutionTemplate> {
@@ -369,7 +380,16 @@ impl Authorization {
         let mut record: Reservation =
             serde_json::from_slice(&trusted_read(&path, 65_536).map_err(|_| "state_unavailable")?)
                 .map_err(|_| "state_unavailable")?;
-        record.response = Some(response.clone());
+        record.response = Some(
+            if matches!(
+                request.operation,
+                Operation::WorkloadLogs { .. } | Operation::Files { .. }
+            ) {
+                Response::error(&request.request_id, "result_not_retained")
+            } else {
+                response.clone()
+            },
+        );
         atomic_write(
             &path,
             &serde_json::to_vec(&record).map_err(|_| "state_unavailable")?,
@@ -385,6 +405,7 @@ impl Authorization {
         .map_err(|_| "state_unavailable")?;
         self.owner = Some(owner);
         self.verified_until = 0;
+        self.decision = None;
         Ok(())
     }
 
@@ -471,6 +492,9 @@ impl Authorization {
                     return Err("decision_binding_mismatch");
                 }
                 self.verified_until = decision.expires_at;
+                if let Operation::Attest { decision } = &request.operation {
+                    self.decision = Some(decision.clone());
+                }
             }
             _ => return Ok(false),
         }
@@ -523,6 +547,7 @@ mod tests {
                     .collect(),
                 require_attestation_for_start: true,
                 execution_templates: Default::default(),
+                volumes: Default::default(),
             };
             Self {
                 authorization: Authorization::open(policy, state).unwrap(),

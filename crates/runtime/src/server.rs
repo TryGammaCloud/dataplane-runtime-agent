@@ -146,6 +146,78 @@ impl RuntimeContext {
                         self.manager.start(profile).map_err(|_| "operation_failed")
                     })
                 }
+                Operation::VolumeUnlock { id } => {
+                    let authorization = self.authorization.as_ref().unwrap();
+                    match (
+                        authorization.volume_policy(id),
+                        authorization.current_decision(),
+                    ) {
+                        (Some(policy), Some(decision)) => {
+                            crate::storage::unlock(id, policy, &envelope, decision)
+                                .map(|_| "mounted".into())
+                                .map_err(|_| "volume_activation_failed")
+                        }
+                        _ => Err("volume_or_attestation_unavailable"),
+                    }
+                }
+                Operation::VolumeRotate { id } => {
+                    let authorization = self.authorization.as_ref().unwrap();
+                    match (
+                        authorization.volume_policy(id),
+                        authorization.current_decision(),
+                    ) {
+                        (Some(policy), Some(decision)) => {
+                            crate::storage::rotate(id, policy, &envelope, decision)
+                                .map(|_| "replacement_key_added".into())
+                                .map_err(|_| "key_rotation_failed")
+                        }
+                        _ => Err("volume_or_attestation_unavailable"),
+                    }
+                }
+                Operation::VolumeLock { id } => {
+                    // Workloads must release their mounts before a non-lazy unmount.
+                    self.manager.shutdown();
+                    self.authorization
+                        .as_ref()
+                        .unwrap()
+                        .volume_policy(id)
+                        .ok_or("volume_denied")
+                        .and_then(|policy| {
+                            crate::storage::lock(id, policy)
+                                .map(|_| "locked".into())
+                                .map_err(|_| "volume_busy_or_lock_failed")
+                        })
+                }
+                Operation::VolumeStatus { id } => self
+                    .authorization
+                    .as_ref()
+                    .unwrap()
+                    .volume_policy(id)
+                    .ok_or("volume_denied")
+                    .map(|policy| {
+                        if crate::storage::ready(id, policy).is_ok() {
+                            "mounted".into()
+                        } else {
+                            "locked_or_unavailable".into()
+                        }
+                    }),
+                Operation::Files {
+                    volume_id,
+                    operation,
+                } => {
+                    let authorization = self.authorization.as_ref().unwrap();
+                    if !authorization.attested() {
+                        Err("attestation_required")
+                    } else {
+                        authorization
+                            .volume_policy(volume_id)
+                            .ok_or("volume_denied")
+                            .and_then(|policy| {
+                                crate::storage::files(volume_id, policy, operation)
+                                    .map_err(|_| "filesystem_operation_failed")
+                            })
+                    }
+                }
                 Operation::Execute { manifest } => {
                     match self
                         .authorization
@@ -155,7 +227,13 @@ impl RuntimeContext {
                     {
                         Some(template) => self
                             .manager
-                            .execute(manifest, &template)
+                            .execute(
+                                manifest,
+                                &template,
+                                template.volume_id.as_ref().and_then(|id| {
+                                    self.authorization.as_ref().unwrap().volume_policy(id)
+                                }),
+                            )
                             .map_err(|_| "isolation_or_execution_failed"),
                         None => Err("template_denied"),
                     }
