@@ -95,7 +95,7 @@ pub fn wait(fd: RawFd, events: i16, deadline: Instant) -> io::Result<()> {
 /// Reads exactly one bounded frame against a total deadline, including slow senders.
 pub fn read_frame(stream: &mut UnixStream, deadline: Instant) -> io::Result<String> {
     let mut bytes = Vec::new();
-    while bytes.len() < 258 {
+    while bytes.len() < gammacloud_protocol::structured::MAX_FRAME_BYTES + 2 {
         wait(stream.as_raw_fd(), libc::POLLIN, deadline)?;
         let mut byte = [0];
         match stream.read(&mut byte) {
@@ -143,6 +143,19 @@ pub fn write_response(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) 
 
 pub fn connection_deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
+}
+
+/// Absolute monotonic boot time is shared by the launcher and its guard process.
+pub fn boot_nanos() -> io::Result<u64> {
+    let mut time: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    u64::try_from(time.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|nanos| nanos.checked_add(time.tv_nsec as u64))
+        .ok_or_else(|| io::Error::other("clock overflow"))
 }
 
 #[cfg(test)]
