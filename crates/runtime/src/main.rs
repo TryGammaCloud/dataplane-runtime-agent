@@ -4,6 +4,7 @@
     reason = "Attestation interfaces await integration with a trusted external verifier."
 )]
 mod attestation;
+mod authorization;
 mod dev_vsock;
 #[allow(
     dead_code,

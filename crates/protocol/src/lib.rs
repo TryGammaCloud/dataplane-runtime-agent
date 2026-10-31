@@ -145,3 +145,5 @@ mod tests {
         assert!(parse_request(&"a".repeat(257)).is_err());
     }
 }
+
+pub mod structured;

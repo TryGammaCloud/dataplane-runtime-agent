@@ -95,7 +95,7 @@ pub fn wait(fd: RawFd, events: i16, deadline: Instant) -> io::Result<()> {
 /// Reads exactly one bounded frame against a total deadline, including slow senders.
 pub fn read_frame(stream: &mut UnixStream, deadline: Instant) -> io::Result<String> {
     let mut bytes = Vec::new();
-    while bytes.len() < 258 {
+    while bytes.len() < gammacloud_protocol::structured::MAX_FRAME_BYTES + 2 {
         wait(stream.as_raw_fd(), libc::POLLIN, deadline)?;
         let mut byte = [0];
         match stream.read(&mut byte) {

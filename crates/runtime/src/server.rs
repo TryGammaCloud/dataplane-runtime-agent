@@ -1,5 +1,6 @@
 //! Guest local Unix protocol server and optional development-only vsock bridge.
 use crate::attestation::AttestationCoordinator;
+use crate::authorization::{Admission, Authorization};
 use crate::dev_vsock;
 use crate::identity::OwnerIdentity;
 use crate::lifecycle;
@@ -9,6 +10,7 @@ use crate::product;
 use crate::security::Policy;
 use crate::session::SessionManager;
 use crate::telemetry::TelemetryCollector;
+use gammacloud_protocol::structured::{Operation, Response, SignedEnvelope};
 use gammacloud_protocol::{GuestState, Request, RequestEnvelope};
 use std::fs;
 #[cfg(test)]
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 struct RuntimeContext {
+    authorization: Option<Authorization>,
     manager: Manager,
     session_manager: SessionManager,
     #[allow(
@@ -35,13 +38,19 @@ struct RuntimeContext {
 
 impl RuntimeContext {
     fn new(log_dir: PathBuf, product: product::Product) -> std::io::Result<Self> {
-        let owner_identity = OwnerIdentity::from_env().ok();
+        let authorization = Authorization::load()?;
+        let owner_identity = if authorization.is_none() {
+            OwnerIdentity::from_env().ok()
+        } else {
+            None
+        };
         let mut session_manager = SessionManager::new();
         if let Some(identity) = owner_identity.clone() {
             let _ = session_manager.create("runtime-session", identity, Duration::from_secs(3600));
         }
         let network_policy = NetworkPolicy::from_env().unwrap_or_else(|_| NetworkPolicy::new());
         Ok(Self {
+            authorization,
             manager: Manager::new(log_dir, Policy::from_env()?, product),
             session_manager,
             owner_identity,
@@ -55,7 +64,8 @@ impl RuntimeContext {
         if !self.manager.authorize(stream)? {
             return Ok(false);
         }
-        if self.network_policy.require_attestation
+        if self.authorization.is_none()
+            && self.network_policy.require_attestation
             && self.attestation.state != crate::attestation::AttestationState::Verified
             && std::env::var("GAMMACLOUD_REQUIRE_ATTESTATION").as_deref() == Ok("1")
         {
@@ -65,14 +75,111 @@ impl RuntimeContext {
     }
 
     fn status_line(&self) -> String {
-        let attestation = match self.attestation.state {
-            crate::attestation::AttestationState::Verified => "verified",
-            crate::attestation::AttestationState::Pending => "pending",
-            crate::attestation::AttestationState::Rejected => "rejected",
-            crate::attestation::AttestationState::Unverified => "unverified",
+        let attestation = if let Some(authorization) = &self.authorization {
+            if authorization.attested() {
+                "decision-verified"
+            } else {
+                "unverified"
+            }
+        } else {
+            match self.attestation.state {
+                crate::attestation::AttestationState::Verified => "verified",
+                crate::attestation::AttestationState::Pending => "pending",
+                crate::attestation::AttestationState::Rejected => "rejected",
+                crate::attestation::AttestationState::Unverified => "unverified",
+            }
         };
         let session_count = self.session_manager.list_active().len();
-        format!("state=ready attestation={attestation} confidential=false sessions={session_count}")
+        let boot = self
+            .authorization
+            .as_ref()
+            .map(|a| format!(" boot_nonce={}", a.boot_nonce()))
+            .unwrap_or_default();
+        format!("state=ready attestation={attestation} confidential=false sessions={session_count}{boot}")
+    }
+}
+
+impl RuntimeContext {
+    fn signed_request(&mut self, raw: &str) -> (String, bool) {
+        let encode = |response: Response| {
+            format!(
+                "{}\n",
+                serde_json::to_string(&response).expect("response serialization")
+            )
+        };
+        let Some(authorization) = self.authorization.as_mut() else {
+            return (
+                encode(Response::error("", "signed_mode_unavailable")),
+                false,
+            );
+        };
+        let envelope: SignedEnvelope = match serde_json::from_str(raw) {
+            Ok(envelope) => envelope,
+            Err(_) => return (encode(Response::error("", "invalid_envelope")), false),
+        };
+        let request = match authorization.admit(&envelope) {
+            Ok(Admission::Execute(request)) => request,
+            Ok(Admission::Cached(response)) => return (encode(response), false),
+            Err(code) => return (encode(Response::error("", code)), false),
+        };
+        let identity_result = authorization.identity_operation(&request);
+        let mut shutdown = false;
+        let result: Result<String, &str> = match identity_result {
+            Err(code) => Err(code),
+            Ok(true) => {
+                if matches!(request.operation, Operation::Revoke) {
+                    self.manager.shutdown();
+                }
+                Ok("identity_updated".into())
+            }
+            Ok(false) => match &request.operation {
+                Operation::Health => Ok("OK".into()),
+                Operation::Status => Ok(self.status_line()),
+                Operation::Start { profile } => {
+                    let profile = match profile.as_str() {
+                        "smoke" => Some(gammacloud_protocol::Profile::Smoke),
+                        "sleep" => Some(gammacloud_protocol::Profile::Sleep),
+                        "worker" => Some(gammacloud_protocol::Profile::Worker),
+                        _ => None,
+                    };
+                    profile.ok_or("profile_denied").and_then(|profile| {
+                        self.manager.start(profile).map_err(|_| "operation_failed")
+                    })
+                }
+                Operation::WorkloadStatus { id } => {
+                    self.manager.status(*id).map_err(|_| "operation_failed")
+                }
+                Operation::WorkloadLogs { id } => {
+                    self.manager.logs(*id).map_err(|_| "operation_failed")
+                }
+                Operation::Stop { id } => self.manager.stop(*id).map_err(|_| "operation_failed"),
+                Operation::Shutdown => {
+                    shutdown = true;
+                    Ok("state=stopping".into())
+                }
+                _ => Err("operation_denied"),
+            },
+        };
+        let response = match result {
+            Ok(result) if result.starts_with("ERR ") => Response::error(
+                &request.request_id,
+                result.trim().trim_start_matches("ERR "),
+            ),
+            Ok(result) => Response::success(&request.request_id, result),
+            Err(code) => Response::error(&request.request_id, code),
+        };
+        let response = if self
+            .authorization
+            .as_ref()
+            .unwrap()
+            .finish(&request, &response)
+            .is_err()
+        {
+            Response::error(&request.request_id, "outcome_unknown")
+        } else {
+            response
+        };
+        (encode(response), shutdown)
     }
 }
 
@@ -107,7 +214,15 @@ fn serve_listener(listener: &UnixListener, socket: &Path, log_dir: PathBuf) -> s
     let product_profile = product::load()?;
     let mut runtime = RuntimeContext::new(log_dir, product_profile)?;
     // SECURITY: The bridge is an unauthenticated development-only transport.
-    dev_vsock::spawn(socket.to_path_buf())?;
+    if runtime.authorization.is_some() {
+        if std::env::var("GAMMACLOUD_DEV_VSOCK_BRIDGE").as_deref() == Ok("1") {
+            return Err(std::io::Error::other(
+                "development bridge forbidden with signed policy",
+            ));
+        }
+    } else {
+        dev_vsock::spawn(socket.to_path_buf())?;
+    }
     println!(
         "gammacloud-runtime state={} attestation=unverified confidential=false",
         GuestState::Ready.as_str()
@@ -162,6 +277,21 @@ fn handle_connection(
         return Ok(false);
     }
     let request = lifecycle::read_frame(stream, deadline)?;
+    if request.starts_with('{') {
+        if !request.ends_with('\n')
+            || request.len() > gammacloud_protocol::structured::MAX_FRAME_BYTES
+        {
+            lifecycle::write_response(stream, b"ERR invalid-request\n", deadline)?;
+            return Ok(false);
+        }
+        let (response, shutdown) = runtime.signed_request(&request);
+        let result = lifecycle::write_response(stream, response.as_bytes(), deadline);
+        if shutdown {
+            return Ok(true);
+        }
+        result?;
+        return Ok(false);
+    }
     if !request.ends_with('\n') || request.trim_end_matches(['\r', '\n']).len() > 256 {
         lifecycle::write_response(stream, b"ERR invalid-request\n", deadline)?;
         return Ok(false);
@@ -173,6 +303,12 @@ fn handle_connection(
             return Ok(false);
         }
     };
+    if runtime.authorization.is_some()
+        && !matches!(envelope.request, Request::Health | Request::Status)
+    {
+        lifecycle::write_response(stream, b"ERR signed-authorization-required\n", deadline)?;
+        return Ok(false);
+    }
     let shutdown = matches!(envelope.request, Request::Shutdown);
     let response = match envelope.request {
         Request::Health => Ok("OK\n".into()),
